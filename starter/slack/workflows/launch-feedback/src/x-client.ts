@@ -1,8 +1,9 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import type {
   XCredentials,
   XPost,
+  PostReceipt,
   XReplyCollection,
   XUser,
 } from "./types";
@@ -22,6 +23,12 @@ export type XReadClient = {
     maxResults?: number;
     signal?: AbortSignal;
   }) => Promise<XReplyCollection>;
+};
+
+export type XClient = XReadClient & {
+  writeMode: "live" | "dry-run";
+  getMe: (signal?: AbortSignal) => Promise<XUser>;
+  createPost: (text: string, signal?: AbortSignal) => Promise<PostReceipt>;
 };
 
 export class XAPIError extends Error {
@@ -64,7 +71,13 @@ export function createXReader(
       "id,name,username,profile_image_url,public_metrics,verified",
     );
 
-    const payload = await requestJSON(endpoint, credentials, fetchImpl, signal);
+    const payload = await requestJSON(
+      "GET",
+      endpoint,
+      credentials,
+      fetchImpl,
+      signal,
+    );
     const root = requiredRecord(payload, "X post response");
     const users = parseIncludedUsers(root.includes);
     return parsePost(requiredRecord(root.data, "X post response data"), users);
@@ -93,6 +106,7 @@ export function createXReader(
     );
 
     const payload = await requestJSON(
+      "GET",
       endpoint,
       credentials,
       fetchImpl,
@@ -119,6 +133,113 @@ export function createXReader(
   }
 
   return { getPost, getPostReplies };
+}
+
+export function createXClient(
+  opts: {
+    credentials: XCredentials;
+    writeMode: "live" | "dry-run";
+  },
+  fetchImpl: Fetch = fetch,
+): XClient {
+  const reader = createXReader(opts.credentials, fetchImpl);
+
+  async function getMe(signal?: AbortSignal): Promise<XUser> {
+    const endpoint = new URL("/2/users/me", API_ORIGIN);
+    endpoint.searchParams.set(
+      "user.fields",
+      "id,name,username,profile_image_url,public_metrics,verified",
+    );
+    const payload = await requestJSON(
+      "GET",
+      endpoint,
+      opts.credentials,
+      fetchImpl,
+      signal,
+    );
+    const root = requiredRecord(payload, "X user response");
+    return parseUser(requiredRecord(root.data, "X user response data"));
+  }
+
+  async function createPost(
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<PostReceipt> {
+    if (opts.writeMode === "dry-run") {
+      const postId = `dryrun-${randomUUID()}`;
+      return {
+        mode: "dry-run",
+        postId,
+        url: `https://x.com/i/web/status/${postId}`,
+        text,
+        postedAt: new Date().toISOString(),
+      };
+    }
+
+    const endpoint = new URL("/2/tweets", API_ORIGIN);
+    const payload = await requestJSON(
+      "POST",
+      endpoint,
+      opts.credentials,
+      fetchImpl,
+      signal,
+      { text },
+    );
+    const root = requiredRecord(payload, "X create post response");
+    const data = requiredRecord(root.data, "X create post response data");
+    const postId = requiredString(data.id, "X create post response data.id");
+    const returnedText = requiredString(
+      data.text,
+      "X create post response data.text",
+    );
+
+    return {
+      mode: "live",
+      postId,
+      url: `https://x.com/i/web/status/${postId}`,
+      text: returnedText,
+      postedAt: new Date().toISOString(),
+    };
+  }
+
+  return {
+    ...reader,
+    writeMode: opts.writeMode,
+    getMe,
+    createPost,
+  };
+}
+
+export function resolveCredentials(
+  env: NodeJS.ProcessEnv,
+): XCredentials | undefined {
+  const apiKey = env.X_API_KEY;
+  const apiSecret = env.X_API_SECRET;
+  const accessToken = env.X_ACCESS_TOKEN;
+  const accessTokenSecret = env.X_ACCESS_TOKEN_SECRET;
+  if (
+    apiKey === undefined ||
+    apiKey === "" ||
+    apiSecret === undefined ||
+    apiSecret === "" ||
+    accessToken === undefined ||
+    accessToken === "" ||
+    accessTokenSecret === undefined ||
+    accessTokenSecret === ""
+  ) {
+    return undefined;
+  }
+  return { apiKey, apiSecret, accessToken, accessTokenSecret };
+}
+
+export function resolveWriteMode(
+  value: string | undefined,
+): { mode: "live" | "dry-run"; error?: undefined } | { error: string } {
+  if (value === undefined || value === "" || value === "1") {
+    return { mode: "dry-run" };
+  }
+  if (value === "0") return { mode: "live" };
+  return { error: 'X_DRY_RUN must be "1" (safe) or "0" (live)' };
 }
 
 export function buildOAuthHeader(
@@ -177,29 +298,34 @@ export function percentEncode(value: string): string {
 }
 
 async function requestJSON(
+  method: "GET" | "POST",
   url: URL,
   credentials: XCredentials,
   fetchImpl: Fetch,
   signal?: AbortSignal,
+  body?: Record<string, unknown>,
 ): Promise<unknown> {
   const response = await fetchImpl(url, {
+    method,
     headers: {
-      Authorization: buildOAuthHeader("GET", url.href, credentials),
+      Authorization: buildOAuthHeader(method, url.href, credentials),
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     signal,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  const body = await response.text();
+  const responseBody = await response.text();
 
   if (!response.ok) {
     throw new XAPIError(
       response.status,
-      `X API returned ${String(response.status)}: ${body.slice(0, 500)}`,
+      `X API returned ${String(response.status)}: ${responseBody.slice(0, 500)}`,
       parseRateLimit(response.headers),
     );
   }
 
   try {
-    return JSON.parse(body) as unknown;
+    return JSON.parse(responseBody) as unknown;
   } catch {
     throw new XAPIError(response.status, "X API returned invalid JSON");
   }

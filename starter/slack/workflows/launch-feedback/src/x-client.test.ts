@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   buildOAuthHeader,
+  createXClient,
   createXReader,
+  resolveWriteMode,
   type Fetch,
 } from "./x-client";
 import type { XCredentials } from "./types";
@@ -151,5 +153,45 @@ describe("X read client", () => {
     await expect(
       reader.getPost("https://x.com/builder/status/123"),
     ).rejects.toThrow("text");
+  });
+});
+
+describe("X write client", () => {
+  test("defaults safely and requires an explicit zero for live writes", () => {
+    expect(resolveWriteMode(undefined)).toEqual({ mode: "dry-run" });
+    expect(resolveWriteMode("1")).toEqual({ mode: "dry-run" });
+    expect(resolveWriteMode("0")).toEqual({ mode: "live" });
+    expect(resolveWriteMode("true")).toHaveProperty("error");
+  });
+
+  test("dry-run createPost never reaches fetch", async () => {
+    let fetchCalls = 0;
+    const client = createXClient(
+      { credentials, writeMode: "dry-run" },
+      async () => {
+        fetchCalls += 1;
+        throw new Error("fetch should not run");
+      },
+    );
+
+    const receipt = await client.createPost("Ship it");
+
+    expect(receipt.mode).toBe("dry-run");
+    expect(receipt.text).toBe("Ship it");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("validates getMe and live createPost responses", async () => {
+    const responses = [
+      Response.json({ data: { id: "me", name: "Me", username: "me" } }),
+      Response.json({ data: { id: "posted", text: "Ship it" } }),
+    ];
+    const client = createXClient(
+      { credentials, writeMode: "live" },
+      async () => responses.shift() ?? Response.json({}),
+    );
+
+    expect((await client.getMe()).id).toBe("me");
+    expect((await client.createPost("Ship it")).postId).toBe("posted");
   });
 });

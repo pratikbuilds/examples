@@ -43,3 +43,193 @@ function invalidXStatusURL(): Error {
     "Expected a full X status URL such as https://x.com/user/status/123",
   );
 }
+
+export function validatePostText(
+  value: unknown,
+): { text: string; error?: undefined } | { text?: undefined; error: string } {
+  if (typeof value !== "string") {
+    return { error: 'x.createPost requires a string "text" argument' };
+  }
+  const text = value.normalize("NFC").trim();
+  if (text === "") return { error: "Post text cannot be empty" };
+  const parsed = twitterText.parseTweet(text);
+  if (!parsed.valid || parsed.weightedLength > 280) {
+    return {
+      error: `Post text is ${String(parsed.weightedLength)} weighted characters; X allows 280`,
+    };
+  }
+  return { text };
+}
+
+export function parseLaunchFeedback(
+  value: unknown,
+  context: { source: XPost; replies: XReplyCollection },
+): LaunchFeedback {
+  const input = requiredRecord(value, "launch feedback");
+  const allowedEvidence = new Set(
+    context.replies.replies.map((reply) => reply.id),
+  );
+  const themes = requiredArray(input.themes, "themes").map((item, index) => {
+    const theme = requiredRecord(item, `themes[${String(index)}]`);
+    return {
+      label: requiredString(theme.label, `themes[${String(index)}].label`),
+      sentiment: requiredEnum(
+        theme.sentiment,
+        ["positive", "mixed", "negative", "neutral"] as const,
+        `themes[${String(index)}].sentiment`,
+      ),
+      summary: requiredString(
+        theme.summary,
+        `themes[${String(index)}].summary`,
+      ),
+      evidencePostIds: parseEvidence(
+        theme.evidencePostIds,
+        allowedEvidence,
+        `themes[${String(index)}].evidencePostIds`,
+      ),
+    };
+  });
+  const faq = requiredArray(input.faq, "faq").map((item, index) => {
+    const entry = requiredRecord(item, `faq[${String(index)}]`);
+    return {
+      question: requiredString(
+        entry.question,
+        `faq[${String(index)}].question`,
+      ),
+      suggestedAnswer: requiredString(
+        entry.suggestedAnswer,
+        `faq[${String(index)}].suggestedAnswer`,
+      ),
+      evidencePostIds: parseEvidence(
+        entry.evidencePostIds,
+        allowedEvidence,
+        `faq[${String(index)}].evidencePostIds`,
+      ),
+    };
+  });
+  const actions = requiredArray(input.actions, "actions").map(
+    (item, index) => {
+      const action = requiredRecord(item, `actions[${String(index)}]`);
+      return {
+        priority: requiredEnum(
+          action.priority,
+          ["high", "medium", "low"] as const,
+          `actions[${String(index)}].priority`,
+        ),
+        owner: requiredEnum(
+          action.owner,
+          ["product", "support", "marketing"] as const,
+          `actions[${String(index)}].owner`,
+        ),
+        action: requiredString(
+          action.action,
+          `actions[${String(index)}].action`,
+        ),
+        evidencePostIds: parseEvidence(
+          action.evidencePostIds,
+          allowedEvidence,
+          `actions[${String(index)}].evidencePostIds`,
+        ),
+      };
+    },
+  );
+  const rawDrafts = requiredArray(input.drafts, "drafts");
+  if (rawDrafts.length !== 3) {
+    throw new Error("drafts must contain exactly three entries");
+  }
+  const drafts = rawDrafts.map((item, index) => {
+    const draft = requiredRecord(item, `drafts[${String(index)}]`);
+    const validation = validatePostText(draft.text);
+    if (validation.error !== undefined) {
+      throw new Error(`drafts[${String(index)}].text: ${validation.error}`);
+    }
+    return {
+      strategy: requiredEnum(
+        draft.strategy,
+        ["concise-recap", "what-we-heard", "next-steps"] as const,
+        `drafts[${String(index)}].strategy`,
+      ),
+      title: requiredString(draft.title, `drafts[${String(index)}].title`),
+      text: validation.text,
+    };
+  });
+  const strategies = new Set(drafts.map((draft) => draft.strategy));
+  if (strategies.size !== 3) {
+    throw new Error("drafts must contain each strategy exactly once");
+  }
+  const repliesById = Object.fromEntries(
+    context.replies.replies.map((reply) => [reply.id, reply]),
+  );
+
+  return {
+    source: context.source,
+    coverage: {
+      ...context.replies.coverage,
+      analyzedReplies: context.replies.analyzedReplies,
+      truncated: context.replies.truncated,
+      ...(context.replies.nextToken !== undefined
+        ? { nextToken: context.replies.nextToken }
+        : {}),
+    },
+    summary: requiredString(input.summary, "summary"),
+    themes,
+    faq,
+    actions,
+    drafts: [drafts[0]!, drafts[1]!, drafts[2]!],
+    repliesById,
+  };
+}
+
+function parseEvidence(
+  value: unknown,
+  allowed: Set<string>,
+  path: string,
+): string[] {
+  const ids = requiredArray(value, path).map((id, index) =>
+    requiredString(id, `${path}[${String(index)}]`),
+  );
+  for (const id of ids) {
+    if (!allowed.has(id)) throw new Error(`${path} contains unknown reply ${id}`);
+  }
+  return ids;
+}
+
+function requiredRecord(
+  value: unknown,
+  path: string,
+): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  return value;
+}
+
+function requiredString(value: unknown, path: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${path} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function requiredEnum<const Values extends readonly string[]>(
+  value: unknown,
+  allowed: Values,
+  path: string,
+): Values[number] {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new Error(`${path} must be one of ${allowed.join(", ")}`);
+  }
+  return value;
+}
+import twitterText from "twitter-text";
+
+import type {
+  LaunchFeedback,
+  XPost,
+  XReplyCollection,
+} from "./types";
