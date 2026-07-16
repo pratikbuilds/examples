@@ -57,11 +57,18 @@ export type FollowUpDraft = {
 };
 
 export type LaunchFeedback = {
-  source: XPost;
-  coverage: XReplyCollection["coverage"] & {
+  source: {
+    url: string;
+    postId: string;
+    authorId: string;
+    authorUsername: string;
+    text: string;
+  };
+  coverage: {
     analyzedReplies: number;
     truncated: boolean;
     nextToken?: string;
+    searchWindow: "recent-7-days";
   };
   summary: string;
   themes: Array<{

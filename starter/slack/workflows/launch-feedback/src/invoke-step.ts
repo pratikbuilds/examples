@@ -160,6 +160,12 @@ export function createInvokeStep(options: {
       safelyObserve(() => options.onStepDone?.(stepId, output));
       return { output };
     } catch (error) {
+      if (receipt !== undefined && receiptCount === 1) {
+        publishDeferred?.resolve(receipt);
+        safelyObserve(() => options.log?.(`step ${stepId}: receipt reconciled`));
+        safelyObserve(() => options.onStepDone?.(stepId, receipt));
+        return { output: receipt };
+      }
       if (publishKey !== undefined) publishExecutions.delete(publishKey);
       publishDeferred?.reject(error);
       throw error;

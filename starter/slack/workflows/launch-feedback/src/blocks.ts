@@ -49,9 +49,7 @@ export function alreadyRunningBlocks(): SlackBlock[] {
   ];
 }
 
-export function feedbackBriefBlocks(
-  feedback: LaunchFeedback,
-): SlackBlock[] {
+export function feedbackBriefBlocks(feedback: LaunchFeedback): SlackBlock[] {
   const blocks: SlackBlock[] = [
     header("Launch feedback brief"),
     section(
@@ -73,7 +71,7 @@ export function feedbackBriefBlocks(
       ),
     );
   } else {
-    blocks.push(section(`*Summary*\n${slackText(feedback.summary)}`));
+    blocks.push(section(`*Summary*\n${boundedText(feedback.summary, 2850)}`));
     blocks.push(...feedbackSectionBlocks(feedback));
   }
 
@@ -186,47 +184,63 @@ export function completionBlocks(): SlackBlock[] {
 }
 
 export function failedBlocks(message: string): SlackBlock[] {
-  return [section(`*:x: Launch feedback failed*\n${slackText(message).slice(0, 2800)}`)];
+  return [
+    section(
+      `*:x: Launch feedback failed*\n${slackText(message).slice(0, 2800)}`,
+    ),
+  ];
 }
 
 function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
   const blocks: SlackBlock[] = [];
   if (feedback.themes.length > 0) {
     blocks.push(
-      section(
-        `*Themes*\n${feedback.themes
-          .map(
-            (theme) =>
-              `• *${slackText(theme.label)}* (${theme.sentiment}) — ${slackText(theme.summary)}${evidence(theme.evidenceUrls)}`,
-          )
-          .join("\n")}`,
+      ...boundedListSections(
+        "Themes",
+        feedback.themes.map(
+          (theme) =>
+            `• *${slackText(theme.label)}* (${theme.sentiment}) — ${slackText(theme.summary)}${evidence(theme.evidenceUrls)}`,
+        ),
       ),
     );
   }
   if (feedback.faq.length > 0) {
     blocks.push(
-      section(
-        `*FAQ opportunities*\n${feedback.faq
-          .map(
-            (entry) =>
-              `• *${slackText(entry.question)}*\n  ${slackText(entry.suggestedAnswer)}${evidence(entry.evidenceUrls)}`,
-          )
-          .join("\n")}`,
+      ...boundedListSections(
+        "FAQ opportunities",
+        feedback.faq.map(
+          (entry) =>
+            `• *${slackText(entry.question)}*\n  ${slackText(entry.suggestedAnswer)}${evidence(entry.evidenceUrls)}`,
+        ),
       ),
     );
   }
   if (feedback.actions.length > 0) {
     blocks.push(
-      section(
-        `*Internal actions*\n${feedback.actions
-          .map(
-            (entry) =>
-              `• *${entry.priority.toUpperCase()} · ${entry.owner}* — ${slackText(entry.action)}${evidence(entry.evidenceUrls)}`,
-          )
-          .join("\n")}`,
+      ...boundedListSections(
+        "Internal actions",
+        feedback.actions.map(
+          (entry) =>
+            `• *${entry.priority.toUpperCase()} · ${entry.owner}* — ${slackText(entry.action)}${evidence(entry.evidenceUrls)}`,
+        ),
       ),
     );
   }
+  return blocks;
+}
+
+function boundedListSections(title: string, entries: string[]): SlackBlock[] {
+  const blocks: SlackBlock[] = [];
+  let body = "";
+  for (const rawEntry of entries) {
+    const entry = rawEntry.slice(0, 2700);
+    if (body !== "" && body.length + entry.length + 1 > 2850) {
+      blocks.push(section(`*${title}*\n${body}`));
+      body = "";
+    }
+    body += `${body === "" ? "" : "\n"}${entry}`;
+  }
+  if (body !== "") blocks.push(section(`*${title}*\n${body}`));
   return blocks;
 }
 
@@ -236,7 +250,15 @@ function evidence(urls: string[]): string {
 }
 
 function slackText(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function boundedText(value: string, limit: number): string {
+  const escaped = slackText(value);
+  return escaped.length <= limit ? escaped : `${escaped.slice(0, limit - 1)}…`;
 }
 
 function plural(count: number, singular: string, pluralValue: string): string {

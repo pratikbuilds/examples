@@ -134,7 +134,10 @@ describe("analysis X tools", () => {
     );
 
     expect(result.isError).not.toBe(true);
-    expect(captured[0]?.source.id).toBe("123");
+    expect(captured[0]?.source).toMatchObject({
+      postId: "123",
+      authorUsername: "builder",
+    });
     expect(captured[0]?.themes[0]?.evidenceUrls).toEqual([
       "https://x.com/user/status/124",
     ]);

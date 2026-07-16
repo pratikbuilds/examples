@@ -262,6 +262,7 @@ const launchFeedbackInputSchema = {
     summary: { type: "string" },
     themes: {
       type: "array",
+      maxItems: 8,
       items: {
         type: "object",
         properties: {
@@ -279,6 +280,7 @@ const launchFeedbackInputSchema = {
     },
     faq: {
       type: "array",
+      maxItems: 8,
       items: {
         type: "object",
         properties: {
@@ -292,6 +294,7 @@ const launchFeedbackInputSchema = {
     },
     actions: {
       type: "array",
+      maxItems: 8,
       items: {
         type: "object",
         properties: {

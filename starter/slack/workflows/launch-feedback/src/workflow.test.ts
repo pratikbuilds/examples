@@ -21,18 +21,16 @@ const source = {
 
 const feedback = {
   source: {
-    id: "123",
+    postId: "123",
     url: "https://x.com/builder/status/123",
     text: "We shipped",
     authorId: "u1",
-    directReply: false,
+    authorUsername: "builder",
   },
   coverage: {
-    source: "recent-search",
-    days: 7,
-    complete: false,
     analyzedReplies: 0,
     truncated: false,
+    searchWindow: "recent-7-days",
   },
   summary: "No replies yet",
   themes: [],

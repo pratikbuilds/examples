@@ -69,7 +69,7 @@ export function parseLaunchFeedback(
   const allowedEvidence = new Set(
     context.replies.replies.map((reply) => reply.id),
   );
-  const themes = requiredArray(input.themes, "themes").map((item, index) => {
+  const themes = boundedArray(input.themes, "themes", 8).map((item, index) => {
     const theme = requiredRecord(item, `themes[${String(index)}]`);
     return {
       label: requiredString(theme.label, `themes[${String(index)}].label`),
@@ -90,7 +90,7 @@ export function parseLaunchFeedback(
       ),
     };
   });
-  const faq = requiredArray(input.faq, "faq").map((item, index) => {
+  const faq = boundedArray(input.faq, "faq", 8).map((item, index) => {
     const entry = requiredRecord(item, `faq[${String(index)}]`);
     return {
       question: requiredString(
@@ -109,7 +109,7 @@ export function parseLaunchFeedback(
       ),
     };
   });
-  const actions = requiredArray(input.actions, "actions").map(
+  const actions = boundedArray(input.actions, "actions", 8).map(
     (item, index) => {
       const action = requiredRecord(item, `actions[${String(index)}]`);
       return {
@@ -170,11 +170,17 @@ export function parseLaunchFeedback(
   }
 
   return {
-    source: context.source,
+    source: {
+      url: context.source.url,
+      postId: context.source.id,
+      authorId: context.source.authorId,
+      authorUsername: context.source.author?.username ?? "unknown",
+      text: context.source.text,
+    },
     coverage: {
-      ...context.replies.coverage,
       analyzedReplies: context.replies.analyzedReplies,
       truncated: context.replies.truncated,
+      searchWindow: "recent-7-days",
       ...(context.replies.nextToken !== undefined
         ? { nextToken: context.replies.nextToken }
         : {}),
@@ -216,6 +222,18 @@ function requiredRecord(
 function requiredArray(value: unknown, path: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
   return value;
+}
+
+function boundedArray(
+  value: unknown,
+  path: string,
+  maximum: number,
+): unknown[] {
+  const result = requiredArray(value, path);
+  if (result.length > maximum) {
+    throw new Error(`${path} must contain at most ${String(maximum)} entries`);
+  }
+  return result;
 }
 
 function requiredString(value: unknown, path: string): string {

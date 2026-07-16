@@ -115,6 +115,7 @@ export function createLaunchFeedbackSessions(options: {
   const sessions = createSlackThreadSessionStore<PendingSession>(
     (session) => session.status !== "finished" && session.status !== "expired",
   );
+  const startingThreads = new Set<string>();
   const draftsByToken = new Map<string, { session: PendingSession; draft: StoredDraft }>();
 
   const startWorkflow: StartWorkflow =
@@ -148,7 +149,7 @@ export function createLaunchFeedbackSessions(options: {
       threadTs: input.threadTs,
     };
     const key = slackThreadKey(thread);
-    if (sessions.getActive(key) !== undefined) {
+    if (sessions.getActive(key) !== undefined || startingThreads.has(key)) {
       await sendMessage(config.botToken, {
         channel: input.channel,
         thread_ts: input.threadTs,
@@ -169,49 +170,56 @@ export function createLaunchFeedbackSessions(options: {
       return;
     }
 
-    await sendMessage(config.botToken, {
-      channel: input.channel,
-      thread_ts: input.threadTs,
-      text: `Analyzing recent replies to ${url}`,
-      blocks: startedBlocks(url),
-    });
-
+    startingThreads.add(key);
     let pending: PendingSession | undefined;
-    const run = startWorkflow({
-      triggerPayload: {
-        url,
-        request: input.prompt,
-        slack: {
-          ...(input.teamId !== undefined ? { teamId: input.teamId } : {}),
-          channel: input.channel,
-          threadTs: input.threadTs,
-          ...(input.userId !== undefined ? { requestedBy: input.userId } : {}),
+    try {
+      await sendMessage(config.botToken, {
+        channel: input.channel,
+        thread_ts: input.threadTs,
+        text: `Analyzing recent replies to ${url}`,
+        blocks: startedBlocks(url),
+      });
+
+      const run = startWorkflow({
+        triggerPayload: {
+          url,
+          request: input.prompt,
+          slack: {
+            ...(input.teamId !== undefined ? { teamId: input.teamId } : {}),
+            channel: input.channel,
+            threadTs: input.threadTs,
+            ...(input.userId !== undefined
+              ? { requestedBy: input.userId }
+              : {}),
+          },
         },
-      },
-      onStepDone(stepId, output) {
-        if (stepId !== "analyze") return;
-        queueMicrotask(() => {
-          if (pending !== undefined) {
-            void presentFeedback(pending, output).catch((error) =>
-              reportFailure(pending!, error),
-            );
-          }
-        });
-      },
-      log: (line) => stderr(`slack-launch-feedback: ${line}\n`),
-    });
-    pending = {
-      key,
-      sessionId: randomUUID(),
-      thread,
-      ...(input.userId !== undefined ? { requestedBy: input.userId } : {}),
-      run,
-      status: "analyzing",
-      publishAllowed: false,
-      drafts: [],
-    };
-    sessions.set(key, pending);
-    void watchTerminal(pending);
+        onStepDone(stepId, output) {
+          if (stepId !== "analyze") return;
+          queueMicrotask(() => {
+            if (pending !== undefined) {
+              void presentFeedback(pending, output).catch((error) =>
+                reportFailure(pending!, error),
+              );
+            }
+          });
+        },
+        log: (line) => stderr(`slack-launch-feedback: ${line}\n`),
+      });
+      pending = {
+        key,
+        sessionId: randomUUID(),
+        thread,
+        ...(input.userId !== undefined ? { requestedBy: input.userId } : {}),
+        run,
+        status: "analyzing",
+        publishAllowed: false,
+        drafts: [],
+      };
+      sessions.set(key, pending);
+      void watchTerminal(pending);
+    } finally {
+      startingThreads.delete(key);
+    }
   }
 
   async function presentFeedback(
@@ -317,12 +325,14 @@ export function createLaunchFeedbackSessions(options: {
     draft.actor = action.userId ?? "slack-user";
     clearSessionTimeout(session);
     invalidateSessionTokens(session);
+    const cardUpdates: Promise<unknown>[] = [];
     for (const candidate of session.drafts) {
       if (candidate !== draft && candidate.status === "pending") {
         candidate.status = "disabled";
       }
-      await updateDraftCard(session, candidate);
+      cardUpdates.push(updateDraftCard(session, candidate));
     }
+    await Promise.allSettled(cardUpdates);
 
     const signal = parseDraftActionSignal({
       publish: true,
@@ -344,7 +354,7 @@ export function createLaunchFeedbackSessions(options: {
     const { session, draft } = match;
     draftsByToken.delete(draft.actionToken);
     draft.status = "skipped";
-    await updateDraftCard(session, draft);
+    await updateDraftCard(session, draft).catch(() => undefined);
 
     if (session.drafts.some((candidate) => candidate.status === "pending")) {
       return;
@@ -486,7 +496,7 @@ export function createLaunchFeedbackSessions(options: {
 
 export function extractXStatusURL(prompt: string): string | undefined {
   const match =
-    /https:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[^\s/>]+\/status\/\d+[^\s>]*/i.exec(
+    /https:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[^\s/>|]+\/status\/\d+[^\s>|]*/i.exec(
       prompt,
     );
   if (match === null) return undefined;

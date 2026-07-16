@@ -26,18 +26,16 @@ const source = {
 
 const feedback = {
   source: {
-    id: "123",
+    postId: "123",
     url: "https://x.com/builder/status/123",
     text: "We shipped",
     authorId: "u1",
-    directReply: false,
+    authorUsername: "builder",
   },
   coverage: {
-    source: "recent-search",
-    days: 7,
-    complete: false,
     analyzedReplies: 0,
     truncated: false,
+    searchWindow: "recent-7-days",
   },
   summary: "No replies yet",
   themes: [],
@@ -227,6 +225,47 @@ describe("StepInvoker", () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toThrow("cannot invoke agent");
+  });
+
+  test("reconciles a captured receipt when the agent fails afterward", async () => {
+    const definition = defineLaunchFeedbackWorkflow(source);
+    const publish = definition.steps.publish;
+    if (publish?.kind !== "step") throw new Error("missing publish step");
+    const receipt: PostReceipt = {
+      mode: "dry-run",
+      postId: "p-reconciled",
+      url: "https://x.com/i/web/status/p-reconciled",
+      text: "Approved",
+      postedAt: "2026-07-16T00:00:00.000Z",
+    };
+    let executions = 0;
+    const invoke = createInvokeStep({
+      source,
+      xClient: client,
+      contextRoot: join(tmpdir(), `launch-invoke-${randomUUID()}`),
+      runAgent: async (_agent, env) => {
+        executions += 1;
+        env.receiptSink(receipt);
+        throw new Error("model failed after tool completion");
+      },
+    });
+    const request = {
+      agent: publish.agent,
+      input: {
+        publish: true,
+        draftId: "d-reconciled",
+        revision: 1,
+        text: "Approved",
+        approvedBy: "U1",
+        approvedAt: "2026-07-16T00:00:00.000Z",
+      },
+      authzContext: { runId: "run-reconciled", stepId: "publish", attempt: 1 },
+      signal: new AbortController().signal,
+    };
+
+    expect((await invoke(request)).output).toEqual(receipt);
+    expect((await invoke(request)).output).toEqual(receipt);
+    expect(executions).toBe(1);
   });
 });
 

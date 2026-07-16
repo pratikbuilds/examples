@@ -11,6 +11,7 @@ import {
   DRAFT_EDIT_CALLBACK_ID,
   DRAFT_PUBLISH_ACTION_ID,
   DRAFT_SKIP_ACTION_ID,
+  feedbackBriefBlocks,
 } from "./blocks";
 import type { LaunchFeedbackConfig } from "./config";
 import {
@@ -22,19 +23,16 @@ import type { LaunchFeedback, PostReceipt } from "./types";
 
 const feedback = {
   source: {
-    id: "123",
+    postId: "123",
     url: "https://x.com/builder/status/123",
     text: "We shipped",
     authorId: "owner",
-    author: { id: "owner", name: "Builder", username: "builder" },
-    directReply: false,
+    authorUsername: "builder",
   },
   coverage: {
-    source: "recent-search",
-    days: 7,
-    complete: false,
     analyzedReplies: 1,
     truncated: false,
+    searchWindow: "recent-7-days",
   },
   summary: "People want export support.",
   themes: [
@@ -97,6 +95,22 @@ describe("launch feedback Slack sessions", () => {
       ),
     ).toEqual([expect.any(String), expect.any(String), expect.any(String)]);
     expect(harness.signals).toHaveLength(0);
+  });
+
+  test("atomically reserves a thread during concurrent starts", async () => {
+    const harness = createHarness({ sendDelayMs: 5 });
+    await Promise.all([
+      harness.sessions.start(startInput()),
+      harness.sessions.start(startInput()),
+    ]);
+
+    expect(harness.starts).toHaveLength(1);
+    expect(harness.messages).toHaveLength(2);
+    expect(
+      harness.messages.some((message) =>
+        message.text.includes("already active"),
+      ),
+    ).toBe(true);
   });
 
   test("edits a draft in a modal and publishes the exact new revision once", async () => {
@@ -206,6 +220,22 @@ describe("launch feedback Slack sessions", () => {
     );
   });
 
+  test("signals approval even when Slack card updates fail", async () => {
+    const harness = createHarness({ failUpdates: true });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+    const draftMessage = harness.messages[2]!;
+    const token = findAction(
+      draftMessage.blocks,
+      DRAFT_PUBLISH_ACTION_ID,
+    )!;
+
+    await harness.sessions.publish(action(token, draftMessage.ts!));
+    expect(harness.signals).toHaveLength(1);
+    expect(harness.signals[0]?.payload).toMatchObject({ publish: true });
+  });
+
   test("expires cards, cancels the parked run, and ignores stale actions", async () => {
     const harness = createHarness({ approvalTimeoutMs: 5 });
     await harness.sessions.start(startInput());
@@ -241,11 +271,47 @@ describe("launch feedback Slack sessions", () => {
   });
 });
 
+describe("feedback Block Kit bounds", () => {
+  test("keeps every dynamic section within Slack limits", () => {
+    const long = "<&>".repeat(2000);
+    const oversized: LaunchFeedback = {
+      ...feedback,
+      summary: long,
+      themes: Array.from({ length: 8 }, (_, index) => ({
+        label: `Theme ${String(index)}`,
+        sentiment: "mixed" as const,
+        summary: long,
+        evidenceUrls: ["https://x.com/user/status/124"],
+      })),
+      faq: Array.from({ length: 8 }, (_, index) => ({
+        question: `Question ${String(index)}`,
+        suggestedAnswer: long,
+        evidenceUrls: ["https://x.com/user/status/124"],
+      })),
+      actions: Array.from({ length: 8 }, (_, index) => ({
+        priority: "medium" as const,
+        owner: "product" as const,
+        action: `${String(index)} ${long}`,
+        evidenceUrls: ["https://x.com/user/status/124"],
+      })),
+    };
+    const blocks = feedbackBriefBlocks(oversized);
+    const sectionLengths = blocks.flatMap((block) => {
+      if (block.type !== "section") return [];
+      const value = "text" in block ? block.text?.text : undefined;
+      return typeof value === "string" ? [value.length] : [];
+    });
+
+    expect(blocks.length).toBeLessThanOrEqual(50);
+    expect(Math.max(...sectionLengths)).toBeLessThanOrEqual(3000);
+  });
+});
+
 describe("extractXStatusURL", () => {
   test("extracts and canonicalizes a Slack-formatted status URL", () => {
     expect(
       extractXStatusURL(
-        "analyze <https://twitter.com/builder/status/123?ref=slack|post>",
+        "analyze <https://twitter.com/builder/status/123|twitter.com/builder/status/123>",
       ),
     ).toBe("https://x.com/builder/status/123");
   });
@@ -255,6 +321,8 @@ function createHarness(options: {
   approvalTimeoutMs?: number;
   writeMode?: "live" | "dry-run";
   authenticatedId?: string;
+  sendDelayMs?: number;
+  failUpdates?: boolean;
 } = {}) {
   const messages: Array<SlackPostMessage & { ts?: string }> = [];
   const updates: SlackUpdateMessage[] = [];
@@ -294,7 +362,18 @@ function createHarness(options: {
         name: "User",
         username: "user",
       }),
-      getPost: async () => feedback.source,
+      getPost: async () => ({
+        id: feedback.source.postId,
+        url: feedback.source.url,
+        text: feedback.source.text,
+        authorId: feedback.source.authorId,
+        author: {
+          id: feedback.source.authorId,
+          name: "Builder",
+          username: feedback.source.authorUsername,
+        },
+        directReply: false,
+      }),
       getPostReplies: async () => ({
         sourcePostId: "123",
         replies: [],
@@ -316,12 +395,18 @@ function createHarness(options: {
       return run;
     },
     async sendMessage(_token, message) {
+      if (options.sendDelayMs !== undefined) {
+        await Bun.sleep(options.sendDelayMs);
+      }
       const ts = `m${String(messages.length + 1)}`;
       messages.push({ ...message, ts });
       return { channel: message.channel, ts };
     },
     async updateMessage(_token, message) {
       updates.push(message);
+      if (options.failUpdates === true) {
+        throw new Error("Slack update unavailable");
+      }
       return { channel: message.channel, ts: message.ts };
     },
     async openModal(_token, input) {
