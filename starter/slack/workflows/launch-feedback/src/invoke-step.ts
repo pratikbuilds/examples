@@ -19,7 +19,7 @@ import type {
 } from "@intx/workflow";
 
 import type { ApprovedDraft, LaunchFeedback, PostReceipt } from "./types";
-import { validatePostText } from "./validation";
+import { parseXStatusURL, validatePostText } from "./validation";
 import type { XClient } from "./x-client";
 import {
   createAnalysisState,
@@ -110,9 +110,10 @@ export function createInvokeStep(options: {
     let feedbackCount = 0;
     let receipt: PostReceipt | undefined;
     let receiptCount = 0;
+    let approvedDraft: ApprovedDraftCapability | undefined;
 
     try {
-      const approvedDraft =
+      approvedDraft =
         approved === undefined
           ? undefined
           : createApprovedDraftCapability(approved);
@@ -131,7 +132,11 @@ export function createInvokeStep(options: {
         authorize: createAgentToolAuthorize(agent.id),
         directors: createDefaultDirectorRegistry(),
         xClient: options.xClient,
-        analysisState: createAnalysisState(),
+        analysisState: createAnalysisState(
+          agent.id === ANALYZE_AGENT_ID
+            ? parseAnalyzeInputURL(input)
+            : undefined,
+        ),
         feedbackSink(value) {
           feedbackCount += 1;
           if (feedbackCount !== 1) {
@@ -173,11 +178,21 @@ export function createInvokeStep(options: {
         safelyObserve(() => options.onStepDone?.(stepId, receipt));
         return { output: receipt };
       }
-      if (publishKey !== undefined) publishExecutions.delete(publishKey);
+      if (
+        publishKey !== undefined &&
+        approvedDraft?.consumed !== true
+      ) {
+        publishExecutions.delete(publishKey);
+      }
       publishDeferred?.reject(error);
       throw error;
     }
   };
+}
+
+function parseAnalyzeInputURL(input: unknown): string {
+  const record = requiredRecord(input, "analysis step input");
+  return parseXStatusURL(record.url).canonicalURL;
 }
 
 export function parseDraftActionSignal(value: unknown): ApprovedDraft {

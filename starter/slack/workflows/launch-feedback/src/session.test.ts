@@ -197,6 +197,31 @@ describe("launch feedback Slack sessions", () => {
     expect(harness.updates).toHaveLength(0);
   });
 
+  test("cancels the session if an edited card cannot be updated", async () => {
+    const harness = createHarness({ failUpdates: true });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+    const draftMessage = harness.messages[2]!;
+    const token = findAction(
+      draftMessage.blocks,
+      "launch-feedback.draft.edit",
+    )!;
+    const submission = harness.sessions.submitEdit({
+      callbackId: DRAFT_EDIT_CALLBACK_ID,
+      privateMetadata: token,
+      teamId: "T1",
+      userId: "U1",
+      state: {},
+      textValues: { "draft.text": "Edited text" },
+    });
+
+    await submission.afterAck?.();
+    expect(harness.cancellations.at(-1)?.reason).toContain(
+      "presentation failed",
+    );
+  });
+
   test("signals publish false only after all three drafts are skipped", async () => {
     const harness = createHarness();
     await harness.sessions.start(startInput());

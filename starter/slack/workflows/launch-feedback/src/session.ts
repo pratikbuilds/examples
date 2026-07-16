@@ -310,7 +310,11 @@ export function createLaunchFeedbackSessions(options: {
 
     return {
       afterAck: async () => {
-        await updateDraftCard(match.session, match.draft);
+        try {
+          await updateDraftCard(match.session, match.draft);
+        } catch (error) {
+          await abortPresentation(match.session, error);
+        }
       },
     };
   }

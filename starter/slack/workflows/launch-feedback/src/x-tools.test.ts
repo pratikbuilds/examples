@@ -177,6 +177,28 @@ describe("analysis X tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("999");
   });
+
+  test("rejects a model-selected URL that differs from the trigger", async () => {
+    const state = createAnalysisState(source.url);
+    const factory = createAnalyzeXTools();
+    const bundle = factory({
+      xClient: createClient(),
+      analysisState: state,
+      feedbackSink: () => undefined,
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
+
+    const result = await bundle.run(
+      {
+        id: "wrong-post",
+        name: "x_get_post",
+        arguments: { url: "https://x.com/other/status/999" },
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("same X status URL");
+  });
 });
 
 describe("createPost approval capability", () => {

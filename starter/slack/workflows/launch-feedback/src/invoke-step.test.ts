@@ -300,6 +300,41 @@ describe("StepInvoker", () => {
     await expect(invoke(request)).rejects.toThrow();
     expect(executions).toBe(0);
   });
+
+  test("tombstones an uncertain mutation instead of retrying", async () => {
+    const definition = defineLaunchFeedbackWorkflow(source);
+    const publish = definition.steps.publish;
+    if (publish?.kind !== "step") throw new Error("missing publish step");
+    let executions = 0;
+    const invoke = createInvokeStep({
+      source,
+      xClient: client,
+      contextRoot: join(tmpdir(), `launch-invoke-${randomUUID()}`),
+      runAgent: async (_agent, env) => {
+        executions += 1;
+        const consumed = env.approvedDraft?.compareAndConsume("Approved");
+        expect(consumed?.error).toBeUndefined();
+        throw new Error("X response lost after mutation attempt");
+      },
+    });
+    const request = {
+      agent: publish.agent,
+      input: {
+        publish: true,
+        draftId: "d-uncertain",
+        revision: 1,
+        text: "Approved",
+        approvedBy: "U1",
+        approvedAt: "2026-07-16T00:00:00.000Z",
+      },
+      authzContext: { runId: "run-uncertain", stepId: "publish", attempt: 1 },
+      signal: new AbortController().signal,
+    };
+
+    await expect(invoke(request)).rejects.toThrow("response lost");
+    await expect(invoke(request)).rejects.toThrow("response lost");
+    expect(executions).toBe(1);
+  });
 });
 
 describe("workflow input boundaries", () => {

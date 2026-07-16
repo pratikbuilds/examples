@@ -28,8 +28,10 @@ export type AnalysisState = {
   replies?: XReplyCollection;
 };
 
-export function createAnalysisState(): AnalysisState {
-  return {};
+export function createAnalysisState(expectedURL?: string): AnalysisState {
+  return expectedURL === undefined
+    ? {}
+    : { sourceURL: parseXStatusURL(expectedURL).canonicalURL };
 }
 
 type AnalyzeXEnv = BaseEnv & {
@@ -135,6 +137,7 @@ export function createAnalyzeXTools() {
 
 export type ApprovedDraftCapability = {
   readonly approved: Readonly<ApprovedDraft>;
+  readonly consumed: boolean;
   compareAndConsume: (
     normalizedText: string,
   ) => { approved: Readonly<ApprovedDraft>; error?: undefined } | { error: string };
@@ -148,6 +151,9 @@ export function createApprovedDraftCapability(
 
   return {
     approved: frozen,
+    get consumed() {
+      return !available;
+    },
     compareAndConsume(normalizedText) {
       if (!available) return { error: "Approved draft was already consumed" };
       if (normalizedText !== frozen.text) {
