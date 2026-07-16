@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseXStatusURL } from "./validation";
+import { parseLaunchFeedback, parseXStatusURL } from "./validation";
 
 describe("parseXStatusURL", () => {
   test("accepts X and legacy Twitter status URLs", () => {
@@ -27,5 +27,48 @@ describe("parseXStatusURL", () => {
     ]) {
       expect(() => parseXStatusURL(value)).toThrow("X status URL");
     }
+  });
+});
+
+describe("empty recent-search coverage", () => {
+  test("rejects reply-derived claims when X returns no replies", () => {
+    expect(() =>
+      parseLaunchFeedback(
+        {
+          summary: "Users love it",
+          themes: [
+            {
+              label: "Love",
+              sentiment: "positive",
+              summary: "People love it",
+              evidencePostIds: [],
+            },
+          ],
+          faq: [],
+          actions: [],
+          drafts: [
+            { strategy: "concise-recap", title: "One", text: "One" },
+            { strategy: "what-we-heard", title: "Two", text: "Two" },
+            { strategy: "next-steps", title: "Three", text: "Three" },
+          ],
+        },
+        {
+          source: {
+            id: "123",
+            url: "https://x.com/user/status/123",
+            text: "Launch",
+            authorId: "u1",
+            directReply: false,
+          },
+          replies: {
+            sourcePostId: "123",
+            replies: [],
+            analyzedReplies: 0,
+            truncated: false,
+            coverage: { source: "recent-search", days: 7, complete: false },
+          },
+        },
+      ),
+    ).toThrow("must be empty");
   });
 });

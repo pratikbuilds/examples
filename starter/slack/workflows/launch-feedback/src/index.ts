@@ -13,7 +13,9 @@ export {
 export type {
   ApprovedDraft,
   FollowUpDraft,
+  DraftActionSignal,
   LaunchFeedback,
+  LaunchFeedbackTrigger,
   PostReceipt,
   XCredentials,
   XPost,
@@ -54,3 +56,19 @@ export {
   PUBLISH_AGENT_ID,
   WORKFLOW_ID,
 } from "./workflow";
+export {
+  createLaunchFeedbackSessions,
+  extractXStatusURL,
+  type LaunchFeedbackSessions,
+  type StartWorkflow,
+} from "./session";
+export {
+  createLaunchFeedbackAdapter,
+  type LaunchFeedbackAdapter,
+} from "./adapter";
+export {
+  resolveConfig,
+  SERVICE_NAME,
+  type LaunchFeedbackConfig,
+} from "./config";
+export { main, type MainOptions } from "./cli";

@@ -103,8 +103,8 @@ describe("analysis X tools", () => {
     const bundle = factory({
       xClient: createClient(),
       analysisState: state,
-      feedbackSink: (feedback) => captured.push(feedback),
-    } as BaseEnv & Parameters<typeof factory>[0]);
+      feedbackSink: (value: LaunchFeedback) => void captured.push(value),
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
 
     expect(bundle.definitions.map((definition) => definition.name)).toEqual([
       "x_get_post",
@@ -135,7 +135,9 @@ describe("analysis X tools", () => {
 
     expect(result.isError).not.toBe(true);
     expect(captured[0]?.source.id).toBe("123");
-    expect(captured[0]?.repliesById["124"]?.text).toContain("export");
+    expect(captured[0]?.themes[0]?.evidenceUrls).toEqual([
+      "https://x.com/user/status/124",
+    ]);
   });
 
   test("rejects evidence that was not returned by getPostReplies", async () => {
@@ -145,7 +147,7 @@ describe("analysis X tools", () => {
       xClient: createClient(),
       analysisState: state,
       feedbackSink: () => undefined,
-    } as BaseEnv & Parameters<typeof factory>[0]);
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
     const signal = new AbortController().signal;
     await bundle.run(
       { id: "post", name: "x_get_post", arguments: { url: source.url } },
@@ -202,7 +204,7 @@ describe("createPost approval capability", () => {
       xClient: client,
       approvedDraft: createApprovedDraftCapability(approved),
       receiptSink: () => undefined,
-    } as BaseEnv & Parameters<typeof factory>[0]);
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
     const signal = new AbortController().signal;
 
     const mismatch = await bundle.run(
@@ -251,7 +253,7 @@ describe("createPost approval capability", () => {
       receiptSink: () => {
         throw new Error("Slack unavailable");
       },
-    } as BaseEnv & Parameters<typeof factory>[0]);
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
 
     const result = await bundle.run(
       {

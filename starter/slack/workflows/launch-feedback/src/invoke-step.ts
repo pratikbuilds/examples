@@ -63,9 +63,11 @@ export function createInvokeStep(options: {
 }): StepInvoker {
   const authorizeWorkflow = options.authorize ?? createWorkflowAuthorize();
   const runAgent = options.runAgent ?? runRuntimeAgent;
+  const publishExecutions = new Map<string, Promise<PostReceipt>>();
 
   return async ({ agent, input, authzContext, signal }) => {
     const stepId = authzContext.stepId ?? agent.id;
+    assertStepAgent(stepId, agent.id);
     const workflowDecision = await authorizeWorkflow(
       `workflow-step:${stepId}`,
       "invoke",
@@ -77,14 +79,35 @@ export function createInvokeStep(options: {
 
     if (agent.id === COMPLETE_AGENT_ID) {
       const output = { status: "completed-without-publishing" as const };
-      options.onStepDone?.(stepId, output);
+      safelyObserve(() => options.onStepDone?.(stepId, output));
       return { output };
     }
 
+    const approved =
+      agent.id === PUBLISH_AGENT_ID ? parseDraftActionSignal(input) : undefined;
+    const publishKey =
+      approved === undefined
+        ? undefined
+        : [
+            authzContext.runId ?? "local-run",
+            approved.draftId,
+            String(approved.revision),
+          ].join(":");
+    const existingPublish =
+      publishKey === undefined ? undefined : publishExecutions.get(publishKey);
+    if (existingPublish !== undefined) {
+      const output = await existingPublish;
+      safelyObserve(() => options.onStepDone?.(stepId, output));
+      return { output };
+    }
+    const publishDeferred =
+      publishKey === undefined ? undefined : createDeferred<PostReceipt>();
+    if (publishKey !== undefined && publishDeferred !== undefined) {
+      publishExecutions.set(publishKey, publishDeferred.promise);
+      void publishDeferred.promise.catch(() => undefined);
+    }
     const approvedDraft =
-      agent.id === PUBLISH_AGENT_ID
-        ? createApprovedDraftCapability(parseDraftActionSignal(input))
-        : undefined;
+      approved === undefined ? undefined : createApprovedDraftCapability(approved);
     const workdir = createStepWorkdir(options.contextRoot, authzContext, stepId);
     const storage = await createIsogitStore(workdir);
     let feedback: LaunchFeedback | undefined;
@@ -119,19 +142,28 @@ export function createInvokeStep(options: {
       ...(approvedDraft !== undefined ? { approvedDraft } : {}),
     };
 
-    options.log?.(`step ${stepId}: ${agent.id} running`);
-    const prompt = typeof input === "string" ? input : JSON.stringify(input);
-    await runAgent(agent, env, prompt, signal);
+    try {
+      safelyObserve(() => options.log?.(`step ${stepId}: ${agent.id} running`));
+      const prompt = typeof input === "string" ? input : JSON.stringify(input);
+      await runAgent(agent, env, prompt, signal);
 
-    const output = requireStepOutput(agent.id, {
-      feedback,
-      feedbackCount,
-      receipt,
-      receiptCount,
-    });
-    options.log?.(`step ${stepId}: done`);
-    options.onStepDone?.(stepId, output);
-    return { output };
+      const output = requireStepOutput(agent.id, {
+        feedback,
+        feedbackCount,
+        receipt,
+        receiptCount,
+      });
+      if (publishDeferred !== undefined) {
+        publishDeferred.resolve(output as PostReceipt);
+      }
+      safelyObserve(() => options.log?.(`step ${stepId}: done`));
+      safelyObserve(() => options.onStepDone?.(stepId, output));
+      return { output };
+    } catch (error) {
+      if (publishKey !== undefined) publishExecutions.delete(publishKey);
+      publishDeferred?.reject(error);
+      throw error;
+    }
   };
 }
 
@@ -264,6 +296,41 @@ function grantFor(
     origin: effect === "allow" ? ("invoker" as const) : ("system" as const),
     specificity: effect === "allow" ? 100 : 0,
   };
+}
+
+function assertStepAgent(stepId: string, agentId: string): void {
+  const expected: Record<string, string> = {
+    analyze: ANALYZE_AGENT_ID,
+    publish: PUBLISH_AGENT_ID,
+    complete: COMPLETE_AGENT_ID,
+  };
+  if (expected[stepId] !== agentId) {
+    throw new Error(
+      `Workflow step ${stepId} cannot invoke agent ${agentId}`,
+    );
+  }
+}
+
+function safelyObserve(callback: () => void): void {
+  try {
+    callback();
+  } catch {
+    // Logs and UI observers cannot change the result of a completed step.
+  }
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason: unknown) => void = () => undefined;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function requiredRecord(value: unknown, path: string): Record<string, unknown> {

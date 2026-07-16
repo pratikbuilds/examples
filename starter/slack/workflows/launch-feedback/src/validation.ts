@@ -82,9 +82,10 @@ export function parseLaunchFeedback(
         theme.summary,
         `themes[${String(index)}].summary`,
       ),
-      evidencePostIds: parseEvidence(
+      evidenceUrls: parseEvidence(
         theme.evidencePostIds,
         allowedEvidence,
+        context.replies,
         `themes[${String(index)}].evidencePostIds`,
       ),
     };
@@ -100,9 +101,10 @@ export function parseLaunchFeedback(
         entry.suggestedAnswer,
         `faq[${String(index)}].suggestedAnswer`,
       ),
-      evidencePostIds: parseEvidence(
+      evidenceUrls: parseEvidence(
         entry.evidencePostIds,
         allowedEvidence,
+        context.replies,
         `faq[${String(index)}].evidencePostIds`,
       ),
     };
@@ -125,9 +127,10 @@ export function parseLaunchFeedback(
           action.action,
           `actions[${String(index)}].action`,
         ),
-        evidencePostIds: parseEvidence(
+        evidenceUrls: parseEvidence(
           action.evidencePostIds,
           allowedEvidence,
+          context.replies,
           `actions[${String(index)}].evidencePostIds`,
         ),
       };
@@ -157,9 +160,14 @@ export function parseLaunchFeedback(
   if (strategies.size !== 3) {
     throw new Error("drafts must contain each strategy exactly once");
   }
-  const repliesById = Object.fromEntries(
-    context.replies.replies.map((reply) => [reply.id, reply]),
-  );
+  if (
+    context.replies.analyzedReplies === 0 &&
+    (themes.length !== 0 || faq.length !== 0 || actions.length !== 0)
+  ) {
+    throw new Error(
+      "themes, faq, and actions must be empty when recent search returns no replies",
+    );
+  }
 
   return {
     source: context.source,
@@ -176,13 +184,13 @@ export function parseLaunchFeedback(
     faq,
     actions,
     drafts: [drafts[0]!, drafts[1]!, drafts[2]!],
-    repliesById,
   };
 }
 
 function parseEvidence(
   value: unknown,
   allowed: Set<string>,
+  replies: XReplyCollection,
   path: string,
 ): string[] {
   const ids = requiredArray(value, path).map((id, index) =>
@@ -191,7 +199,8 @@ function parseEvidence(
   for (const id of ids) {
     if (!allowed.has(id)) throw new Error(`${path} contains unknown reply ${id}`);
   }
-  return ids;
+  const byId = new Map(replies.replies.map((reply) => [reply.id, reply.url]));
+  return ids.map((id) => byId.get(id)!);
 }
 
 function requiredRecord(

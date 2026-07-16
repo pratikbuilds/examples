@@ -43,7 +43,6 @@ const feedback = {
     { strategy: "what-we-heard", title: "Two", text: "Two" },
     { strategy: "next-steps", title: "Three", text: "Three" },
   ],
-  repliesById: {},
 } satisfies LaunchFeedback;
 
 const receipt: PostReceipt = {
@@ -110,14 +109,27 @@ describe("launch feedback workflow routing", () => {
       invokeStep,
     });
 
-    await run.signal(DRAFT_ACTION_SIGNAL, {
+    await waitFor(() => invoked.includes(ANALYZE_AGENT_ID));
+    let completed = false;
+    void run.complete.then(() => {
+      completed = true;
+    });
+    await Bun.sleep(5);
+    expect(invoked).toEqual([ANALYZE_AGENT_ID]);
+    expect(completed).toBe(false);
+
+    const signal = {
       publish: true,
       draftId: "d1",
       revision: 1,
       text: "One",
       approvedBy: "U1",
       approvedAt: "2026-07-16T00:00:00.000Z",
-    });
+    };
+    await Promise.all([
+      run.signal(DRAFT_ACTION_SIGNAL, signal, "slack-action-1"),
+      run.signal(DRAFT_ACTION_SIGNAL, signal, "slack-action-1"),
+    ]);
     const result = await run.complete;
 
     expect(result.terminalStatus).toBe("completed");
@@ -149,3 +161,11 @@ describe("launch feedback workflow routing", () => {
     expect(result.outputs.publish).toBeUndefined();
   });
 });
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) return;
+    await Bun.sleep(1);
+  }
+  throw new Error("condition was not reached");
+}

@@ -10,6 +10,7 @@ export type SlackWorkflowStartInput = {
   channel: string;
   threadTs: string;
   prompt: string;
+  userId?: string;
 };
 
 export type SlackWorkflowActionHandler = (
@@ -40,7 +41,13 @@ export function createSlackWorkflowAdapter(opts: {
         return;
       }
 
-      await opts.onStart({ teamId, channel, threadTs, prompt });
+      await opts.onStart({
+        teamId,
+        channel,
+        threadTs,
+        prompt,
+        ...(event.user !== undefined ? { userId: event.user } : {}),
+      });
     },
 
     async onBlockAction(action) {
@@ -58,6 +65,7 @@ export function createSlackWorkflowAdapter(opts: {
         channel: message.channel,
         threadTs: message.threadTs,
         prompt: message.prompt,
+        ...(message.userId !== undefined ? { userId: message.userId } : {}),
       });
     },
   };

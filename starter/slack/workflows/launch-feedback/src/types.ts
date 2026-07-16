@@ -68,22 +68,36 @@ export type LaunchFeedback = {
     label: string;
     sentiment: "positive" | "mixed" | "negative" | "neutral";
     summary: string;
-    evidencePostIds: string[];
+    evidenceUrls: string[];
   }>;
   faq: Array<{
     question: string;
     suggestedAnswer: string;
-    evidencePostIds: string[];
+    evidenceUrls: string[];
   }>;
   actions: Array<{
     priority: "high" | "medium" | "low";
     owner: "product" | "support" | "marketing";
     action: string;
-    evidencePostIds: string[];
+    evidenceUrls: string[];
   }>;
   drafts: [FollowUpDraft, FollowUpDraft, FollowUpDraft];
-  repliesById: Record<string, XPost>;
 };
+
+export type LaunchFeedbackTrigger = {
+  url: string;
+  request: string;
+  slack: {
+    teamId?: string;
+    channel: string;
+    threadTs: string;
+    requestedBy?: string;
+  };
+};
+
+export type DraftActionSignal =
+  | ({ publish: true } & ApprovedDraft)
+  | { publish: false; reason: "all-drafts-skipped" };
 
 export type ApprovedDraft = {
   draftId: string;
