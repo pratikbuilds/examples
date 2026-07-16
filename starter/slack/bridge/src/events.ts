@@ -21,10 +21,25 @@ export type SlackAssistantMessage = SlackAssistantThread & {
 export type SlackBlockAction = {
   actionId: string;
   value?: string;
+  triggerId?: string;
   teamId?: string;
   userId?: string;
   channelId?: string;
   messageTs?: string;
+};
+
+export type SlackViewSubmission = {
+  callbackId: string;
+  privateMetadata: string;
+  teamId?: string;
+  userId?: string;
+  state: Record<string, unknown>;
+  textValues: Record<string, string>;
+};
+
+export type SlackViewSubmissionResult = {
+  errors?: Record<string, string>;
+  afterAck?: () => void | Promise<void>;
 };
 
 export function toSlackBlockAction(
@@ -43,10 +58,41 @@ export function toSlackBlockAction(
   return {
     actionId: stringValue(actionRecord.action_id) ?? "",
     value: stringValue(actionRecord.value),
+    triggerId: stringValue(bodyRecord.trigger_id),
     teamId: stringValue(team.id) ?? contextTeamId,
     userId: stringValue(user.id),
     channelId: stringValue(channel.id),
     messageTs: stringValue(message.ts) ?? stringValue(container.message_ts),
+  };
+}
+
+export function toSlackViewSubmission(
+  contextTeamId: string | undefined,
+  body: unknown,
+): SlackViewSubmission {
+  const bodyRecord = asRecord(body);
+  const team = asRecord(bodyRecord.team);
+  const user = asRecord(bodyRecord.user);
+  const view = asRecord(bodyRecord.view);
+  const state = asRecord(view.state);
+  const blocks = asRecord(state.values);
+  const textValues: Record<string, string> = {};
+
+  for (const [blockId, rawActions] of Object.entries(blocks)) {
+    const actions = asRecord(rawActions);
+    for (const [actionId, rawValue] of Object.entries(actions)) {
+      const value = stringValue(asRecord(rawValue).value);
+      if (value !== undefined) textValues[`${blockId}.${actionId}`] = value;
+    }
+  }
+
+  return {
+    callbackId: stringValue(view.callback_id) ?? "",
+    privateMetadata: stringValue(view.private_metadata) ?? "",
+    teamId: stringValue(team.id) ?? contextTeamId,
+    userId: stringValue(user.id),
+    state: blocks,
+    textValues,
   };
 }
 

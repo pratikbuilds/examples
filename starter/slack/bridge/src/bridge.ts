@@ -5,10 +5,13 @@ import {
   toSlackAssistantMessage,
   toSlackAssistantThread,
   toSlackBlockAction,
+  toSlackViewSubmission,
   type SlackAssistantMessage,
   type SlackAssistantThread,
   type SlackBlockAction,
   type SlackEvent,
+  type SlackViewSubmission,
+  type SlackViewSubmissionResult,
   type SlashCommand,
 } from "./events";
 
@@ -21,6 +24,9 @@ export type SlackBridgeConfig = SlackConnectionConfig & {
   onEvent: (teamId: string | undefined, event: SlackEvent) => void | Promise<void>;
   onSlashCommand?: (command: SlashCommand) => void | Promise<void>;
   onBlockAction?: (action: SlackBlockAction) => void | Promise<void>;
+  onViewSubmission?: (
+    submission: SlackViewSubmission,
+  ) => SlackViewSubmissionResult;
   onAssistantThreadStarted?: (
     thread: SlackAssistantThread,
   ) => void | Promise<void>;
@@ -93,6 +99,32 @@ export async function startSlackBridge(
           toSlackBlockAction(context.teamId, body, action),
         ),
       );
+    });
+  }
+
+  if (config.onViewSubmission !== undefined) {
+    app.view(/.*/, async ({ body, ack, context }) => {
+      let result: SlackViewSubmissionResult;
+      try {
+        result = config.onViewSubmission?.(
+          toSlackViewSubmission(context.teamId, body),
+        ) ?? {};
+      } catch (error) {
+        await ack();
+        const message = error instanceof Error ? error.message : String(error);
+        config.stderr(`${config.serviceName}: ${message}\n`);
+        return;
+      }
+
+      if (result.errors !== undefined) {
+        await ack({ response_action: "errors", errors: result.errors });
+        return;
+      }
+
+      await ack();
+      if (result.afterAck !== undefined) {
+        await dispatch(config, result.afterAck);
+      }
     });
   }
 

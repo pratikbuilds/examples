@@ -14,13 +14,18 @@ export {
   type SlackAssistantThread,
   type SlackBlockAction,
   type SlackEvent,
+  type SlackViewSubmission,
+  type SlackViewSubmissionResult,
   type SlashCommand,
 } from "./events";
 export {
   cleanSlackText,
+  openModal,
   postMessage,
   truncateForSlack,
+  updateMessage,
   type SlackPostMessage,
+  type SlackUpdateMessage,
 } from "./messages";
 export {
   startSlackBridge,
