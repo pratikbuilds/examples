@@ -220,6 +220,42 @@ describe("launch feedback Slack sessions", () => {
     );
   });
 
+  test("concurrent skips emit one completion signal", async () => {
+    const harness = createHarness({ updateDelayMs: 5 });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+    const actions = harness.messages.slice(2).map((message) =>
+      action(findAction(message.blocks, DRAFT_SKIP_ACTION_ID)!, message.ts!),
+    );
+
+    await Promise.all(actions.map((item) => harness.sessions.skip(item)));
+    expect(harness.signals).toEqual([
+      {
+        name: "draft-action",
+        payload: { publish: false, reason: "all-drafts-skipped" },
+      },
+    ]);
+  });
+
+  test("a claimed publish cannot race with skip into conflicting signals", async () => {
+    const harness = createHarness({ updateDelayMs: 5 });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+    const first = harness.messages[2]!;
+    const second = harness.messages[3]!;
+    const skipToken = findAction(first.blocks, DRAFT_SKIP_ACTION_ID)!;
+    const publishToken = findAction(second.blocks, DRAFT_PUBLISH_ACTION_ID)!;
+
+    await Promise.all([
+      harness.sessions.skip(action(skipToken, first.ts!)),
+      harness.sessions.publish(action(publishToken, second.ts!)),
+    ]);
+    expect(harness.signals).toHaveLength(1);
+    expect(harness.signals[0]?.payload).toMatchObject({ publish: true });
+  });
+
   test("signals approval even when Slack card updates fail", async () => {
     const harness = createHarness({ failUpdates: true });
     await harness.sessions.start(startInput());
@@ -234,6 +270,50 @@ describe("launch feedback Slack sessions", () => {
     await harness.sessions.publish(action(token, draftMessage.ts!));
     expect(harness.signals).toHaveLength(1);
     expect(harness.signals[0]?.payload).toMatchObject({ publish: true });
+  });
+
+  test("preserves a successful receipt when its card update fails", async () => {
+    const harness = createHarness({ failUpdates: true });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+    const draftMessage = harness.messages[2]!;
+    await harness.sessions.publish(
+      action(
+        findAction(draftMessage.blocks, DRAFT_PUBLISH_ACTION_ID)!,
+        draftMessage.ts!,
+      ),
+    );
+    harness.finish({
+      publish: {
+        mode: "dry-run",
+        postId: "dryrun-fallback",
+        url: "https://x.com/i/web/status/dryrun-fallback",
+        text: "Draft one",
+        postedAt: "2026-07-16T00:00:00.000Z",
+      } satisfies PostReceipt,
+    });
+    await settle();
+
+    expect(harness.messages.at(-1)?.text).toContain(
+      "Dry-run publication completed",
+    );
+    expect(
+      harness.messages.some((message) => message.text.includes("failed")),
+    ).toBe(false);
+  });
+
+  test("cancels and releases the thread when feedback presentation fails", async () => {
+    const harness = createHarness({ failSendAt: 2 });
+    await harness.sessions.start(startInput());
+    harness.onStepDone("analyze", feedback);
+    await settle();
+
+    expect(harness.cancellations.at(-1)?.reason).toContain(
+      "presentation failed",
+    );
+    await harness.sessions.start(startInput());
+    expect(harness.starts).toHaveLength(2);
   });
 
   test("expires cards, cancels the parked run, and ignores stale actions", async () => {
@@ -304,6 +384,9 @@ describe("feedback Block Kit bounds", () => {
 
     expect(blocks.length).toBeLessThanOrEqual(50);
     expect(Math.max(...sectionLengths)).toBeLessThanOrEqual(3000);
+    expect(JSON.stringify(blocks)).toContain(
+      "https://x.com/user/status/124",
+    );
   });
 });
 
@@ -323,6 +406,8 @@ function createHarness(options: {
   authenticatedId?: string;
   sendDelayMs?: number;
   failUpdates?: boolean;
+  updateDelayMs?: number;
+  failSendAt?: number;
 } = {}) {
   const messages: Array<SlackPostMessage & { ts?: string }> = [];
   const updates: SlackUpdateMessage[] = [];
@@ -331,6 +416,7 @@ function createHarness(options: {
   const cancellations: Array<{ origin: string; reason: string }> = [];
   const starts: Parameters<StartWorkflow>[0][] = [];
   let onStepDone: Parameters<StartWorkflow>[0]["onStepDone"] = () => undefined;
+  let sendCount = 0;
   const complete = deferred<Awaited<WorkflowRun["complete"]>>();
   const run: WorkflowRun = {
     runId: "run-1",
@@ -395,8 +481,12 @@ function createHarness(options: {
       return run;
     },
     async sendMessage(_token, message) {
+      sendCount += 1;
       if (options.sendDelayMs !== undefined) {
         await Bun.sleep(options.sendDelayMs);
+      }
+      if (options.failSendAt === sendCount) {
+        throw new Error("Slack post unavailable");
       }
       const ts = `m${String(messages.length + 1)}`;
       messages.push({ ...message, ts });
@@ -404,6 +494,9 @@ function createHarness(options: {
     },
     async updateMessage(_token, message) {
       updates.push(message);
+      if (options.updateDelayMs !== undefined) {
+        await Bun.sleep(options.updateDelayMs);
+      }
       if (options.failUpdates === true) {
         throw new Error("Slack update unavailable");
       }

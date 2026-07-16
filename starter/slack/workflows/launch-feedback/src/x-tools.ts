@@ -253,6 +253,7 @@ const urlInputSchema = {
 
 const evidenceSchema = {
   type: "array",
+  maxItems: 5,
   items: { type: "string" },
 } as const;
 

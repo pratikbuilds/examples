@@ -267,6 +267,39 @@ describe("StepInvoker", () => {
     expect((await invoke(request)).output).toEqual(receipt);
     expect(executions).toBe(1);
   });
+
+  test("clears publish dedupe when step storage initialization fails", async () => {
+    const definition = defineLaunchFeedbackWorkflow(source);
+    const publish = definition.steps.publish;
+    if (publish?.kind !== "step") throw new Error("missing publish step");
+    let executions = 0;
+    const invoke = createInvokeStep({
+      source,
+      xClient: client,
+      contextRoot: "/dev/null",
+      runAgent: async () => {
+        executions += 1;
+        return { reply: "not reached" };
+      },
+    });
+    const request = {
+      agent: publish.agent,
+      input: {
+        publish: true,
+        draftId: "d-storage",
+        revision: 1,
+        text: "Approved",
+        approvedBy: "U1",
+        approvedAt: "2026-07-16T00:00:00.000Z",
+      },
+      authzContext: { runId: "run-storage", stepId: "publish", attempt: 1 },
+      signal: new AbortController().signal,
+    };
+
+    await expect(invoke(request)).rejects.toThrow();
+    await expect(invoke(request)).rejects.toThrow();
+    expect(executions).toBe(0);
+  });
 });
 
 describe("workflow input boundaries", () => {

@@ -106,43 +106,50 @@ export function createInvokeStep(options: {
       publishExecutions.set(publishKey, publishDeferred.promise);
       void publishDeferred.promise.catch(() => undefined);
     }
-    const approvedDraft =
-      approved === undefined ? undefined : createApprovedDraftCapability(approved);
-    const workdir = createStepWorkdir(options.contextRoot, authzContext, stepId);
-    const storage = await createIsogitStore(workdir);
     let feedback: LaunchFeedback | undefined;
     let feedbackCount = 0;
     let receipt: PostReceipt | undefined;
     let receiptCount = 0;
 
-    const env: LaunchFeedbackAgentEnv = {
-      sources: [options.source],
-      defaultSource: options.source.id,
-      storage,
-      workdir,
-      audit: noopAuditStore(),
-      authorize: createAgentToolAuthorize(agent.id),
-      directors: createDefaultDirectorRegistry(),
-      xClient: options.xClient,
-      analysisState: createAnalysisState(),
-      feedbackSink(value) {
-        feedbackCount += 1;
-        if (feedbackCount !== 1) {
-          throw new Error(`${LAUNCH_PRESENT_FEEDBACK_TOOL} may be called only once`);
-        }
-        feedback = value;
-      },
-      receiptSink(value) {
-        receiptCount += 1;
-        if (receiptCount !== 1) {
-          throw new Error(`${X_CREATE_POST_TOOL} may be called only once`);
-        }
-        receipt = value;
-      },
-      ...(approvedDraft !== undefined ? { approvedDraft } : {}),
-    };
-
     try {
+      const approvedDraft =
+        approved === undefined
+          ? undefined
+          : createApprovedDraftCapability(approved);
+      const workdir = createStepWorkdir(
+        options.contextRoot,
+        authzContext,
+        stepId,
+      );
+      const storage = await createIsogitStore(workdir);
+      const env: LaunchFeedbackAgentEnv = {
+        sources: [options.source],
+        defaultSource: options.source.id,
+        storage,
+        workdir,
+        audit: noopAuditStore(),
+        authorize: createAgentToolAuthorize(agent.id),
+        directors: createDefaultDirectorRegistry(),
+        xClient: options.xClient,
+        analysisState: createAnalysisState(),
+        feedbackSink(value) {
+          feedbackCount += 1;
+          if (feedbackCount !== 1) {
+            throw new Error(
+              `${LAUNCH_PRESENT_FEEDBACK_TOOL} may be called only once`,
+            );
+          }
+          feedback = value;
+        },
+        receiptSink(value) {
+          receiptCount += 1;
+          if (receiptCount !== 1) {
+            throw new Error(`${X_CREATE_POST_TOOL} may be called only once`);
+          }
+          receipt = value;
+        },
+        ...(approvedDraft !== undefined ? { approvedDraft } : {}),
+      };
       safelyObserve(() => options.log?.(`step ${stepId}: ${agent.id} running`));
       const prompt = typeof input === "string" ? input : JSON.stringify(input);
       await runAgent(agent, env, prompt, signal);

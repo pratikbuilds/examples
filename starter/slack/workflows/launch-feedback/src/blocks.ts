@@ -199,7 +199,7 @@ function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
         "Themes",
         feedback.themes.map(
           (theme) =>
-            `• *${slackText(theme.label)}* (${theme.sentiment}) — ${slackText(theme.summary)}${evidence(theme.evidenceUrls)}`,
+            `• *${boundedText(theme.label, 180)}* (${theme.sentiment}) — ${boundedText(theme.summary, 1800)}${evidence(theme.evidenceUrls)}`,
         ),
       ),
     );
@@ -210,7 +210,7 @@ function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
         "FAQ opportunities",
         feedback.faq.map(
           (entry) =>
-            `• *${slackText(entry.question)}*\n  ${slackText(entry.suggestedAnswer)}${evidence(entry.evidenceUrls)}`,
+            `• *${boundedText(entry.question, 300)}*\n  ${boundedText(entry.suggestedAnswer, 1800)}${evidence(entry.evidenceUrls)}`,
         ),
       ),
     );
@@ -221,7 +221,7 @@ function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
         "Internal actions",
         feedback.actions.map(
           (entry) =>
-            `• *${entry.priority.toUpperCase()} · ${entry.owner}* — ${slackText(entry.action)}${evidence(entry.evidenceUrls)}`,
+            `• *${entry.priority.toUpperCase()} · ${entry.owner}* — ${boundedText(entry.action, 1900)}${evidence(entry.evidenceUrls)}`,
         ),
       ),
     );
@@ -232,8 +232,7 @@ function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
 function boundedListSections(title: string, entries: string[]): SlackBlock[] {
   const blocks: SlackBlock[] = [];
   let body = "";
-  for (const rawEntry of entries) {
-    const entry = rawEntry.slice(0, 2700);
+  for (const entry of entries) {
     if (body !== "" && body.length + entry.length + 1 > 2850) {
       blocks.push(section(`*${title}*\n${body}`));
       body = "";

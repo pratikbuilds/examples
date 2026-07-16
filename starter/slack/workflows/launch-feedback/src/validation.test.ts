@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseLaunchFeedback, parseXStatusURL } from "./validation";
+import {
+  parseLaunchFeedback,
+  parseXStatusURL,
+  validatePostText,
+} from "./validation";
 
 describe("parseXStatusURL", () => {
   test("accepts X and legacy Twitter status URLs", () => {
@@ -70,5 +74,17 @@ describe("empty recent-search coverage", () => {
         },
       ),
     ).toThrow("must be empty");
+  });
+});
+
+describe("Slack-safe X text", () => {
+  test("rejects URL-heavy text that is X-valid but too large for Slack", () => {
+    const text = Array.from(
+      { length: 10 },
+      (_, index) => `https://example.com/${String(index)}/${"x".repeat(300)}`,
+    ).join(" ");
+    const result = validatePostText(text);
+
+    expect(result.error).toContain("too large to review safely in Slack");
   });
 });

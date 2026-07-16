@@ -197,8 +197,8 @@ export function createLaunchFeedbackSessions(options: {
           if (stepId !== "analyze") return;
           queueMicrotask(() => {
             if (pending !== undefined) {
-              void presentFeedback(pending, output).catch((error) =>
-                reportFailure(pending!, error),
+            void presentFeedback(pending, output).catch((error) =>
+                abortPresentation(pending!, error),
               );
             }
           });
@@ -354,14 +354,16 @@ export function createLaunchFeedbackSessions(options: {
     const { session, draft } = match;
     draftsByToken.delete(draft.actionToken);
     draft.status = "skipped";
-    await updateDraftCard(session, draft).catch(() => undefined);
-
-    if (session.drafts.some((candidate) => candidate.status === "pending")) {
-      return;
+    const allSkipped = !session.drafts.some(
+      (candidate) => candidate.status === "pending",
+    );
+    if (allSkipped) {
+      session.status = "resuming";
+      clearSessionTimeout(session);
+      invalidateSessionTokens(session);
     }
-    session.status = "resuming";
-    clearSessionTimeout(session);
-    invalidateSessionTokens(session);
+    await updateDraftCard(session, draft).catch(() => undefined);
+    if (!allSkipped) return;
     await session.run.signal(DRAFT_ACTION_SIGNAL, {
       publish: false,
       reason: "all-drafts-skipped",
@@ -380,7 +382,21 @@ export function createLaunchFeedbackSessions(options: {
         if (receipt !== undefined && selected !== undefined) {
           selected.status = "published";
           selected.receipt = receipt;
-          await updateDraftCard(session, selected);
+          try {
+            await updateDraftCard(session, selected);
+          } catch (error) {
+            stderr(
+              `slack-launch-feedback: receipt card update failed: ${errorMessage(error)}\n`,
+            );
+            await sendMessage(config.botToken, {
+              channel: session.thread.channel,
+              thread_ts: session.thread.threadTs,
+              text:
+                receipt.mode === "live"
+                  ? `Published to X: ${receipt.url}`
+                  : `Dry-run publication completed: ${receipt.postId}`,
+            }).catch(() => undefined);
+          }
         } else if (result.outputs.complete !== undefined) {
           await sendMessage(config.botToken, {
             channel: session.thread.channel,
@@ -477,6 +493,21 @@ export function createLaunchFeedbackSessions(options: {
       text: `Launch feedback failed: ${message}`,
       blocks: failedBlocks(message),
     }).catch(() => undefined);
+  }
+
+  async function abortPresentation(
+    session: PendingSession,
+    error: unknown,
+  ): Promise<void> {
+    await reportFailure(session, error);
+    try {
+      await session.run.cancel(
+        "supervisor-operator",
+        "Slack feedback presentation failed",
+      );
+    } finally {
+      finishSession(session);
+    }
   }
 
   function clearSessionTimeout(session: PendingSession): void {

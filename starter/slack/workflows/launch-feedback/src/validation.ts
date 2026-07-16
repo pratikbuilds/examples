@@ -58,6 +58,18 @@ export function validatePostText(
       error: `Post text is ${String(parsed.weightedLength)} weighted characters; X allows 280`,
     };
   }
+  const slackPreview = `>${text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .split("\n")
+    .join("\n>")}`;
+  if (text.length > 3000 || slackPreview.length > 3000) {
+    return {
+      error:
+        "Post text is X-valid but too large to review safely in Slack (3000-character display limit)",
+    };
+  }
   return { text };
 }
 
@@ -199,7 +211,11 @@ function parseEvidence(
   replies: XReplyCollection,
   path: string,
 ): string[] {
-  const ids = requiredArray(value, path).map((id, index) =>
+  const rawIds = requiredArray(value, path);
+  if (rawIds.length > 5) {
+    throw new Error(`${path} must contain at most five replies`);
+  }
+  const ids = rawIds.map((id, index) =>
     requiredString(id, `${path}[${String(index)}]`),
   );
   for (const id of ids) {
