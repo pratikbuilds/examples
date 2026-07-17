@@ -15,11 +15,18 @@ export function createReplyTriageAdapter(options: {
   stderr: Write;
 }): ReplyTriageAdapter {
   const sessions = createReplyTriageSessions(options);
+  const { stderr } = options;
   return createSlackWorkflowAdapter({
     onStart: sessions.start,
     actionHandlers: {
-      [APPROVE_ACTION_ID]: (action) => sessions.approve(action.value, action.userId),
-      [REJECT_ACTION_ID]: (action) => sessions.reject(action.value, action.userId),
+      [APPROVE_ACTION_ID]: async (action) => {
+        stderr(`slack-x-reply-triage: received approve action\n`);
+        await sessions.approve(action.value, action.userId);
+      },
+      [REJECT_ACTION_ID]: async (action) => {
+        stderr(`slack-x-reply-triage: received reject action\n`);
+        await sessions.reject(action.value, action.userId);
+      },
     },
   });
 }

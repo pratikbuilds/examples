@@ -256,7 +256,7 @@ export function createReplyTriageSessions(options: {
     stderr(
       `slack-x-reply-triage: draft ${draft.draft.replyId} ${decision}\n`,
     );
-    await editMessage(config.botToken, {
+    void editMessage(config.botToken, {
       channel: pending.thread.channel,
       ts: draft.messageTs,
       text:
@@ -264,7 +264,11 @@ export function createReplyTriageSessions(options: {
           ? `Approved reply to @${draft.draft.authorUsername}`
           : `Rejected reply to @${draft.draft.authorUsername}`,
       blocks: draftDecisionBlocks(draft.draft, decision),
-    }).catch(() => undefined);
+    }).catch((error) => {
+      stderr(
+        `slack-x-reply-triage: failed to update draft card: ${errorMessage(error)}\n`,
+      );
+    });
 
     await maybeSignalApproval(pending);
   }

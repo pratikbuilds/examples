@@ -24,9 +24,12 @@ cd starter/slack/workflows/launch-feedback
 cp .env.example .env
 ```
 
-Import `manifest.slack.json` into Slack (Interactivity must be enabled), turn on
-Socket Mode, install or reinstall the app, and invite it to the test channel.
-Configure the Slack, model, and four X OAuth credentials in `.env`. Set
+You can reuse the shared Slack app named **interchange** from
+`starter/slack/agent/manifest.slack.json` (Interactivity + Socket Mode already
+on). Put that app's tokens in `.env` — you do not need a separate reply-triage
+app. Only run one Socket Mode process with those tokens at a time.
+
+In Slack app settings, confirm **Interactivity & Shortcuts → On**. Set
 `X_DRY_RUN=1` to approve drafts without publishing live replies.
 
 ## Run
