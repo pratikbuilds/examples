@@ -2,9 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   buildOAuthHeader,
-  createXClient,
   createXReader,
-  resolveWriteMode,
+  XAPIError,
   type Fetch,
 } from "./x-client";
 import type { XCredentials } from "./types";
@@ -32,6 +31,13 @@ describe("buildOAuthHeader", () => {
 });
 
 describe("X read client", () => {
+  test("exposes only post and reply reads", () => {
+    const reader = createXReader(credentials, async () => Response.json({}));
+
+    expect(Object.keys(reader).sort()).toEqual(["getPost", "getPostReplies"]);
+    expect("createPost" in reader).toBe(false);
+  });
+
   test("normalizes a post and its expanded author", async () => {
     const requests: Request[] = [];
     const reader = createXReader(credentials, async (input, init) => {
@@ -141,8 +147,24 @@ describe("X read client", () => {
     expect(result.truncated).toBe(true);
     expect(result.coverage.complete).toBe(false);
     const url = new URL(requestedURL);
-    expect(url.searchParams.get("query")).toBe("conversation_id:123");
+    expect(url.searchParams.get("query")).toBe(
+      "conversation_id:123 is:reply",
+    );
     expect(url.searchParams.get("max_results")).toBe("100");
+  });
+
+  test("defaults recent reply collection to a bounded sample", async () => {
+    let requestedURL = "";
+    const reader = createXReader(credentials, async (input) => {
+      requestedURL = String(input);
+      return Response.json({ meta: { result_count: 0 } });
+    });
+
+    await reader.getPostReplies({
+      url: "https://x.com/builder/status/123",
+    });
+
+    expect(new URL(requestedURL).searchParams.get("max_results")).toBe("25");
   });
 
   test("rejects malformed successful responses at the fetch boundary", async () => {
@@ -154,44 +176,30 @@ describe("X read client", () => {
       reader.getPost("https://x.com/builder/status/123"),
     ).rejects.toThrow("text");
   });
-});
 
-describe("X write client", () => {
-  test("defaults safely and requires an explicit zero for live writes", () => {
-    expect(resolveWriteMode(undefined)).toEqual({ mode: "dry-run" });
-    expect(resolveWriteMode("1")).toEqual({ mode: "dry-run" });
-    expect(resolveWriteMode("0")).toEqual({ mode: "live" });
-    expect(resolveWriteMode("true")).toHaveProperty("error");
-  });
-
-  test("dry-run createPost never reaches fetch", async () => {
-    let fetchCalls = 0;
-    const client = createXClient(
-      { credentials, writeMode: "dry-run" },
-      async () => {
-        fetchCalls += 1;
-        throw new Error("fetch should not run");
-      },
+  test("preserves API status and rate-limit details", async () => {
+    const reader = createXReader(credentials, async () =>
+      new Response("rate limited", {
+        status: 429,
+        headers: {
+          "x-rate-limit-limit": "15",
+          "x-rate-limit-remaining": "0",
+          "x-rate-limit-reset": "1700000000",
+        },
+      }),
     );
 
-    const receipt = await client.createPost("Ship it");
-
-    expect(receipt.mode).toBe("dry-run");
-    expect(receipt.text).toBe("Ship it");
-    expect(fetchCalls).toBe(0);
-  });
-
-  test("validates getMe and live createPost responses", async () => {
-    const responses = [
-      Response.json({ data: { id: "me", name: "Me", username: "me" } }),
-      Response.json({ data: { id: "posted", text: "Ship it" } }),
-    ];
-    const client = createXClient(
-      { credentials, writeMode: "live" },
-      async () => responses.shift() ?? Response.json({}),
-    );
-
-    expect((await client.getMe()).id).toBe("me");
-    expect((await client.createPost("Ship it")).postId).toBe("posted");
+    try {
+      await reader.getPost("https://x.com/builder/status/123");
+      throw new Error("expected X API error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(XAPIError);
+      expect((error as XAPIError).status).toBe(429);
+      expect((error as XAPIError).rateLimit).toEqual({
+        limit: 15,
+        remaining: 0,
+        resetAt: "2023-11-14T22:13:20.000Z",
+      });
+    }
   });
 });

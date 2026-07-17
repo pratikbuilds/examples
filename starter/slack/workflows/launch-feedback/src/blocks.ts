@@ -1,34 +1,11 @@
-import {
-  actions,
-  button,
-  header,
-  section,
-  type SlackBlock,
-} from "@corbits/example-slack-bridge";
-import type { ModalView } from "@slack/types";
+import { header, section, type SlackBlock } from "@corbits/example-slack-bridge";
 
-import type { FollowUpDraft, LaunchFeedback, PostReceipt } from "./types";
-
-export const DRAFT_EDIT_ACTION_ID = "launch-feedback.draft.edit";
-export const DRAFT_PUBLISH_ACTION_ID = "launch-feedback.draft.publish";
-export const DRAFT_SKIP_ACTION_ID = "launch-feedback.draft.skip";
-export const DRAFT_EDIT_CALLBACK_ID = "launch-feedback.draft.edit.submit";
-export const DRAFT_TEXT_BLOCK_ID = "draft";
-export const DRAFT_TEXT_ACTION_ID = "text";
-
-export type DraftCardStatus =
-  | "pending"
-  | "skipped"
-  | "publishing"
-  | "published"
-  | "expired"
-  | "disabled"
-  | "preview-only";
+import type { ReplyTriageResult } from "./types";
 
 export function startedBlocks(url: string): SlackBlock[] {
   return [
     section(
-      `*Launch feedback analysis started*\nReading the post and recent replies for <${url}|this X post>.`,
+      `*Reply triage started*\nReading the post and recent replies for <${url}|this X post>.`,
     ),
   ];
 }
@@ -44,189 +21,98 @@ export function invalidURLBlocks(): SlackBlock[] {
 export function alreadyRunningBlocks(): SlackBlock[] {
   return [
     section(
-      "*Analysis already in review*\nUse the draft actions already posted in this thread.",
+      "*Reply triage already active*\nWait for the current analysis in this thread to finish.",
     ),
   ];
 }
 
-export function feedbackBriefBlocks(feedback: LaunchFeedback): SlackBlock[] {
+export function triageResultBlocks(result: ReplyTriageResult): SlackBlock[] {
+  const { snapshot, triage } = result;
   const blocks: SlackBlock[] = [
-    header("Launch feedback brief"),
+    header("X reply triage"),
     section(
       [
-        `*Source:* <${feedback.source.url}|X post>`,
-        `*Coverage:* ${String(feedback.coverage.analyzedReplies)} recent ${plural(feedback.coverage.analyzedReplies, "reply", "replies")} analyzed`,
+        `*Source:* <${snapshot.source.url}|@${slackText(snapshot.source.authorUsername)} on X>`,
+        `*Coverage:* ${String(snapshot.coverage.analyzedReplies)} recent ${plural(snapshot.coverage.analyzedReplies, "reply", "replies")} analyzed · X reports ${String(snapshot.source.metrics.replies)} total ${plural(snapshot.source.metrics.replies, "reply", "replies")}`,
         "*Search window:* X recent search (up to 7 days; historical coverage is not guaranteed)",
-        feedback.coverage.truncated
+        snapshot.coverage.truncated
           ? "*Pagination:* more recent results are available"
           : "*Pagination:* no additional page was returned",
       ].join("\n"),
     ),
+    section(`*Overview*\n${boundedText(triage.overview, 2800)}`),
   ];
 
-  if (feedback.coverage.analyzedReplies === 0) {
+  if (snapshot.coverage.analyzedReplies === 0) {
     blocks.push(
       section(
-        "*:warning: Incomplete coverage*\nX recent search returned no replies in its available window. This does not mean the post has never received replies, so no reply-derived themes, FAQ, or actions are claimed.",
+        "*:warning: Incomplete coverage*\nNo replies were returned by X recent search. This does not mean the post has never received replies.",
       ),
     );
   } else {
-    blocks.push(section(`*Summary*\n${boundedText(feedback.summary, 2850)}`));
-    blocks.push(...feedbackSectionBlocks(feedback));
-  }
-
-  blocks.push(section("*Follow-up drafts*\nChoose one to edit or publish, or skip all three."));
-  return blocks;
-}
-
-export function draftCardBlocks(input: {
-  draft: FollowUpDraft;
-  revision: number;
-  actionToken: string;
-  status: DraftCardStatus;
-  actor?: string;
-  receipt?: PostReceipt;
-}): SlackBlock[] {
-  const { draft, revision, actionToken, status } = input;
-  const blocks: SlackBlock[] = [
-    header(draft.title.slice(0, 150)),
-    section(`>${slackText(draft.text).split("\n").join("\n>")}`),
-    section(
-      `*Strategy:* ${draft.strategy}  •  *Revision:* ${String(revision)}  •  *Characters:* ${String([...draft.text].length)}/280`,
-    ),
-  ];
-
-  if (status === "pending") {
     blocks.push(
-      actions([
-        button({
-          text: "Publish",
-          style: "primary",
-          actionId: DRAFT_PUBLISH_ACTION_ID,
-          value: actionToken,
-        }),
-        button({
-          text: "Edit",
-          actionId: DRAFT_EDIT_ACTION_ID,
-          value: actionToken,
-        }),
-        button({
-          text: "Skip",
-          actionId: DRAFT_SKIP_ACTION_ID,
-          value: actionToken,
-        }),
-      ]),
-    );
-    return blocks;
-  }
-
-  if (status === "published" && input.receipt !== undefined) {
-    const receipt = input.receipt;
-    blocks.push(
-      section(
-        receipt.mode === "live"
-          ? `*:white_check_mark: Published by <@${input.actor ?? "slack-user"}>*\n<${receipt.url}|Open the post on X> • ${receipt.postedAt}`
-          : `*:white_check_mark: Dry-run publication approved by <@${input.actor ?? "slack-user"}>*\nNo X POST request was sent. Receipt: \`${receipt.postId}\``,
+      ...classificationBlocks(
+        "Respond now",
+        triage.classifications.filter((item) => item.priority === "respond-now"),
+      ),
+      ...classificationBlocks(
+        "Respond later",
+        triage.classifications.filter(
+          (item) => item.priority === "respond-later",
+        ),
       ),
     );
-    return blocks;
+
+    const themes = triage.themes.slice(0, 5).map(
+      (theme) =>
+        `• *${boundedText(theme.label, 160)}* · ${String(theme.count)} · ${theme.sentiment}\n  ${boundedText(theme.summary, 900)}${evidence(theme.evidenceURLs)}`,
+    );
+    if (themes.length > 0) blocks.push(...boundedListSections("Themes", themes));
+
+    const amplification = triage.amplificationOpportunities
+      .slice(0, 5)
+      .map(
+        (item) =>
+          `• <${item.replyURL}|Open reply> — ${boundedText(item.reason, 900)}`,
+      );
+    if (amplification.length > 0) {
+      blocks.push(...boundedListSections("Worth amplifying", amplification));
+    }
   }
 
-  const labels: Record<Exclude<DraftCardStatus, "pending">, string> = {
-    skipped: ":fast_forward: Skipped",
-    publishing: ":hourglass_flowing_sand: Publishing approved text",
-    expired: ":clock1: Expired — actions are disabled",
-    disabled: ":no_entry_sign: Another draft was selected — actions are disabled",
-    "preview-only": ":lock: Preview only — the authenticated X account does not own the source post",
-    published: ":white_check_mark: Published",
-  };
-  blocks.push(section(`*${labels[status]}*`));
-  return blocks;
-}
-
-export function editDraftModal(input: {
-  actionToken: string;
-  draft: FollowUpDraft;
-  revision: number;
-}): ModalView {
-  return {
-    type: "modal",
-    callback_id: DRAFT_EDIT_CALLBACK_ID,
-    private_metadata: input.actionToken,
-    title: { type: "plain_text", text: "Edit X draft" },
-    submit: { type: "plain_text", text: "Save draft" },
-    close: { type: "plain_text", text: "Cancel" },
-    blocks: [
-      {
-        type: "input",
-        block_id: DRAFT_TEXT_BLOCK_ID,
-        label: {
-          type: "plain_text",
-          text: `Draft revision ${String(input.revision)}`,
-        },
-        element: {
-          type: "plain_text_input",
-          action_id: DRAFT_TEXT_ACTION_ID,
-          multiline: true,
-          initial_value: input.draft.text,
-        },
-      },
-    ],
-  };
-}
-
-export function completionBlocks(): SlackBlock[] {
-  return [
+  blocks.push(
     section(
-      "*:white_check_mark: Review complete*\nAll three drafts were skipped. Nothing was published to X.",
+      `*Totals:* ${String(triage.counts.respondNow)} respond now · ${String(triage.counts.respondLater)} respond later · ${String(triage.counts.noResponse)} no response needed`,
     ),
-  ];
+  );
+  return blocks;
 }
 
 export function failedBlocks(message: string): SlackBlock[] {
   return [
-    section(
-      `*:x: Launch feedback failed*\n${slackText(message).slice(0, 2800)}`,
-    ),
+    section(`*:x: Reply triage failed*\n${boundedText(message, 2800)}`),
   ];
 }
 
-function feedbackSectionBlocks(feedback: LaunchFeedback): SlackBlock[] {
-  const blocks: SlackBlock[] = [];
-  if (feedback.themes.length > 0) {
-    blocks.push(
-      ...boundedListSections(
-        "Themes",
-        feedback.themes.map(
-          (theme) =>
-            `• *${boundedText(theme.label, 180)}* (${theme.sentiment}) — ${boundedText(theme.summary, 1800)}${evidence(theme.evidenceUrls)}`,
-        ),
-      ),
-    );
+function classificationBlocks(
+  title: string,
+  entries: ReplyTriageResult["triage"]["classifications"],
+): SlackBlock[] {
+  const visible = entries.slice(0, 5).map((entry) =>
+    [
+      `• *<${entry.replyURL}|@${slackText(entry.authorUsername)}>* · ${entry.reason} · ${entry.recommendedOwner}`,
+      `  ${boundedText(entry.summary, 800)}`,
+      entry.suggestedResponseAngle === undefined
+        ? undefined
+        : `  _Response angle:_ ${boundedText(entry.suggestedResponseAngle, 700)}`,
+    ]
+      .filter((value): value is string => value !== undefined)
+      .join("\n"),
+  );
+  if (entries.length > visible.length) {
+    visible.push(`• _${String(entries.length - visible.length)} more not shown_`);
   }
-  if (feedback.faq.length > 0) {
-    blocks.push(
-      ...boundedListSections(
-        "FAQ opportunities",
-        feedback.faq.map(
-          (entry) =>
-            `• *${boundedText(entry.question, 300)}*\n  ${boundedText(entry.suggestedAnswer, 1800)}${evidence(entry.evidenceUrls)}`,
-        ),
-      ),
-    );
-  }
-  if (feedback.actions.length > 0) {
-    blocks.push(
-      ...boundedListSections(
-        "Internal actions",
-        feedback.actions.map(
-          (entry) =>
-            `• *${entry.priority.toUpperCase()} · ${entry.owner}* — ${boundedText(entry.action, 1900)}${evidence(entry.evidenceUrls)}`,
-        ),
-      ),
-    );
-  }
-  return blocks;
+  return visible.length === 0 ? [] : boundedListSections(title, visible);
 }
 
 function boundedListSections(title: string, entries: string[]): SlackBlock[] {
@@ -244,8 +130,14 @@ function boundedListSections(title: string, entries: string[]): SlackBlock[] {
 }
 
 function evidence(urls: string[]): string {
-  if (urls.length === 0) return "";
-  return ` (${urls.map((url, index) => `<${url}|evidence ${String(index + 1)}>`).join(", ")})`;
+  return urls.length === 0
+    ? ""
+    : ` (${urls.map((url, index) => `<${url}|evidence ${String(index + 1)}>`).join(", ")})`;
+}
+
+function boundedText(value: string, limit: number): string {
+  const escaped = slackText(value);
+  return escaped.length <= limit ? escaped : `${escaped.slice(0, limit - 1)}…`;
 }
 
 function slackText(value: string): string {
@@ -253,11 +145,6 @@ function slackText(value: string): string {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
-}
-
-function boundedText(value: string, limit: number): string {
-  const escaped = slackText(value);
-  return escaped.length <= limit ? escaped : `${escaped.slice(0, limit - 1)}…`;
 }
 
 function plural(count: number, singular: string, pluralValue: string): string {

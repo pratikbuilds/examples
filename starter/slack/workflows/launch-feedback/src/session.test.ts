@@ -1,613 +1,317 @@
 import { describe, expect, test } from "bun:test";
 
-import type {
-  SlackBlockAction,
-  SlackPostMessage,
-  SlackUpdateMessage,
-} from "@corbits/example-slack-bridge";
-import type { WorkflowRun } from "@intx/workflow";
+import type { SlackBlock } from "@corbits/example-slack-bridge";
 
+import { triageResultBlocks } from "./blocks";
+import type { ReplyTriageConfig } from "./config";
 import {
-  DRAFT_EDIT_CALLBACK_ID,
-  DRAFT_PUBLISH_ACTION_ID,
-  DRAFT_SKIP_ACTION_ID,
-  feedbackBriefBlocks,
-} from "./blocks";
-import type { LaunchFeedbackConfig } from "./config";
-import {
-  createLaunchFeedbackSessions,
+  createReplyTriageSessions,
   extractXStatusURL,
+  type ReplyTriageRun,
   type StartWorkflow,
 } from "./session";
-import type { LaunchFeedback, PostReceipt } from "./types";
+import type { ReplyTriageResult } from "./types";
 
-const feedback = {
+const config = {
+  signingSecret: "secret",
+  botToken: "xoxb-test",
+  appToken: "xapp-test",
+  port: 3000,
   source: {
-    postId: "123",
-    url: "https://x.com/builder/status/123",
-    text: "We shipped",
-    authorId: "owner",
-    authorUsername: "builder",
+    id: "openai:test",
+    provider: "openai",
+    baseURL: "https://api.openai.com/v1",
+    apiKey: "test",
+    model: "test",
   },
-  coverage: {
-    analyzedReplies: 1,
-    truncated: false,
-    searchWindow: "recent-7-days",
+  xClient: {
+    getPost: async () => {
+      throw new Error("not used");
+    },
+    getPostReplies: async () => {
+      throw new Error("not used");
+    },
   },
-  summary: "People want export support.",
-  themes: [
-    {
-      label: "Exports",
-      sentiment: "neutral",
-      summary: "Users asked about exports.",
-      evidenceUrls: ["https://x.com/user/status/124"],
-    },
-  ],
-  faq: [
-    {
-      question: "Can it export?",
-      suggestedAnswer: "Exports are planned.",
-      evidenceUrls: ["https://x.com/user/status/124"],
-    },
-  ],
-  actions: [
-    {
-      priority: "high",
-      owner: "product",
-      action: "Clarify exports.",
-      evidenceUrls: ["https://x.com/user/status/124"],
-    },
-  ],
-  drafts: [
-    { strategy: "concise-recap", title: "Recap", text: "Draft one" },
-    { strategy: "what-we-heard", title: "What we heard", text: "Draft two" },
-    { strategy: "next-steps", title: "Next steps", text: "Draft three" },
-  ],
-} satisfies LaunchFeedback;
+  contextRoot: "/tmp/reply-triage-test",
+} satisfies ReplyTriageConfig;
 
-describe("launch feedback Slack sessions", () => {
-  test("rejects raw ids and profile URLs before starting a workflow", async () => {
-    const harness = createHarness();
-    await harness.sessions.start(startInput("analyze 1234567890"));
-    await harness.sessions.start(startInput("analyze https://x.com/example"));
-
-    expect(harness.starts).toHaveLength(0);
-    expect(harness.messages).toHaveLength(2);
-    expect(harness.messages.every((message) => message.text.includes("full X status URL"))).toBe(true);
-  });
-
-  test("renders one brief and exactly three actionable draft cards", async () => {
-    const harness = createHarness();
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-
-    expect(harness.starts[0]?.triggerPayload.url).toBe(feedback.source.url);
-    expect(harness.messages).toHaveLength(5);
-    expect(harness.messages[1]?.blocks).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "header" }),
-      ]),
-    );
-    expect(
-      harness.messages.slice(2).map((message) =>
-        findAction(message.blocks, DRAFT_PUBLISH_ACTION_ID),
-      ),
-    ).toEqual([expect.any(String), expect.any(String), expect.any(String)]);
-    expect(harness.signals).toHaveLength(0);
-  });
-
-  test("atomically reserves a thread during concurrent starts", async () => {
-    const harness = createHarness({ sendDelayMs: 5 });
-    await Promise.all([
-      harness.sessions.start(startInput()),
-      harness.sessions.start(startInput()),
-    ]);
-
-    expect(harness.starts).toHaveLength(1);
-    expect(harness.messages).toHaveLength(2);
-    expect(
-      harness.messages.some((message) =>
-        message.text.includes("already active"),
-      ),
-    ).toBe(true);
-  });
-
-  test("edits a draft in a modal and publishes the exact new revision once", async () => {
-    const harness = createHarness();
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[3]!;
-    const originalToken = findAction(
-      draftMessage.blocks,
-      "launch-feedback.draft.edit",
-    )!;
-
-    await harness.sessions.edit(action(originalToken, draftMessage.ts!, {
-      triggerId: "trigger-1",
-    }));
-    expect(harness.modals).toHaveLength(1);
-    expect(JSON.stringify(harness.modals[0])).toContain("Draft two");
-
-    const submission = harness.sessions.submitEdit({
-      callbackId: DRAFT_EDIT_CALLBACK_ID,
-      privateMetadata: originalToken,
-      teamId: "T1",
-      userId: "U2",
-      state: {},
-      textValues: { "draft.text": "Edited approved text" },
-    });
-    expect(submission.errors).toBeUndefined();
-    await submission.afterAck?.();
-    const updated = harness.updates.at(-1)!;
-    expect(JSON.stringify(updated.blocks)).toContain("*Revision:* 2");
-    expect(JSON.stringify(updated.blocks)).toContain("Edited approved text");
-    const publishToken = findAction(updated.blocks, DRAFT_PUBLISH_ACTION_ID)!;
-
-    await harness.sessions.publish(action(publishToken, draftMessage.ts!));
-    await harness.sessions.publish(action(publishToken, draftMessage.ts!));
-
-    expect(harness.signals).toHaveLength(1);
-    expect(harness.signals[0]).toMatchObject({
-      name: "draft-action",
-      payload: {
-        publish: true,
-        revision: 2,
-        text: "Edited approved text",
-        approvedBy: "U1",
-      },
-    });
-
-    const receipt: PostReceipt = {
-      mode: "dry-run",
-      postId: "dryrun-1",
-      url: "https://x.com/i/web/status/dryrun-1",
-      text: "Edited approved text",
-      postedAt: "2026-07-16T00:00:00.000Z",
-    };
-    harness.finish({ publish: receipt });
-    await settle();
-    expect(JSON.stringify(harness.updates.at(-1)?.blocks)).toContain(
-      "Dry-run publication approved",
-    );
-  });
-
-  test("returns inline modal errors without changing the card", async () => {
-    const harness = createHarness();
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[2]!;
-    const token = findAction(
-      draftMessage.blocks,
-      "launch-feedback.draft.edit",
-    )!;
-    const result = harness.sessions.submitEdit({
-      callbackId: DRAFT_EDIT_CALLBACK_ID,
-      privateMetadata: token,
-      teamId: "T1",
-      userId: "U1",
-      state: {},
-      textValues: { "draft.text": "x".repeat(400) },
-    });
-
-    expect(result.errors?.draft).toContain("280");
-    expect(result.afterAck).toBeUndefined();
-    expect(harness.updates).toHaveLength(0);
-  });
-
-  test("cancels the session if an edited card cannot be updated", async () => {
-    const harness = createHarness({ failUpdates: true });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[2]!;
-    const token = findAction(
-      draftMessage.blocks,
-      "launch-feedback.draft.edit",
-    )!;
-    const submission = harness.sessions.submitEdit({
-      callbackId: DRAFT_EDIT_CALLBACK_ID,
-      privateMetadata: token,
-      teamId: "T1",
-      userId: "U1",
-      state: {},
-      textValues: { "draft.text": "Edited text" },
-    });
-
-    await submission.afterAck?.();
-    expect(harness.cancellations.at(-1)?.reason).toContain(
-      "presentation failed",
-    );
-  });
-
-  test("signals publish false only after all three drafts are skipped", async () => {
-    const harness = createHarness();
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    for (const message of harness.messages.slice(2)) {
-      const token = findAction(message.blocks, DRAFT_SKIP_ACTION_ID)!;
-      await harness.sessions.skip(action(token, message.ts!));
-    }
-
-    expect(harness.signals).toEqual([
-      {
-        name: "draft-action",
-        payload: { publish: false, reason: "all-drafts-skipped" },
-      },
-    ]);
-    harness.finish({ complete: { status: "completed-without-publishing" } });
-    await settle();
-    expect(harness.messages.at(-1)?.text).toBe(
-      "Review completed without publishing.",
-    );
-  });
-
-  test("concurrent skips emit one completion signal", async () => {
-    const harness = createHarness({ updateDelayMs: 5 });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const actions = harness.messages.slice(2).map((message) =>
-      action(findAction(message.blocks, DRAFT_SKIP_ACTION_ID)!, message.ts!),
-    );
-
-    await Promise.all(actions.map((item) => harness.sessions.skip(item)));
-    expect(harness.signals).toEqual([
-      {
-        name: "draft-action",
-        payload: { publish: false, reason: "all-drafts-skipped" },
-      },
-    ]);
-  });
-
-  test("a claimed publish cannot race with skip into conflicting signals", async () => {
-    const harness = createHarness({ updateDelayMs: 5 });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const first = harness.messages[2]!;
-    const second = harness.messages[3]!;
-    const skipToken = findAction(first.blocks, DRAFT_SKIP_ACTION_ID)!;
-    const publishToken = findAction(second.blocks, DRAFT_PUBLISH_ACTION_ID)!;
-
-    await Promise.all([
-      harness.sessions.skip(action(skipToken, first.ts!)),
-      harness.sessions.publish(action(publishToken, second.ts!)),
-    ]);
-    expect(harness.signals).toHaveLength(1);
-    expect(harness.signals[0]?.payload).toMatchObject({ publish: true });
-  });
-
-  test("signals approval even when Slack card updates fail", async () => {
-    const harness = createHarness({ failUpdates: true });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[2]!;
-    const token = findAction(
-      draftMessage.blocks,
-      DRAFT_PUBLISH_ACTION_ID,
-    )!;
-
-    await harness.sessions.publish(action(token, draftMessage.ts!));
-    expect(harness.signals).toHaveLength(1);
-    expect(harness.signals[0]?.payload).toMatchObject({ publish: true });
-  });
-
-  test("preserves a successful receipt when its card update fails", async () => {
-    const harness = createHarness({ failUpdates: true });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[2]!;
-    await harness.sessions.publish(
-      action(
-        findAction(draftMessage.blocks, DRAFT_PUBLISH_ACTION_ID)!,
-        draftMessage.ts!,
-      ),
-    );
-    harness.finish({
-      publish: {
-        mode: "dry-run",
-        postId: "dryrun-fallback",
-        url: "https://x.com/i/web/status/dryrun-fallback",
-        text: "Draft one",
-        postedAt: "2026-07-16T00:00:00.000Z",
-      } satisfies PostReceipt,
-    });
-    await settle();
-
-    expect(harness.messages.at(-1)?.text).toContain(
-      "Dry-run publication completed",
-    );
-    expect(
-      harness.messages.some((message) => message.text.includes("failed")),
-    ).toBe(false);
-  });
-
-  test("cancels and releases the thread when feedback presentation fails", async () => {
-    const harness = createHarness({ failSendAt: 2 });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-
-    expect(harness.cancellations.at(-1)?.reason).toContain(
-      "presentation failed",
-    );
-    await harness.sessions.start(startInput());
-    expect(harness.starts).toHaveLength(2);
-  });
-
-  test("expires cards, cancels the parked run, and ignores stale actions", async () => {
-    const harness = createHarness({ approvalTimeoutMs: 5 });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-    const draftMessage = harness.messages[2]!;
-    const token = findAction(draftMessage.blocks, DRAFT_PUBLISH_ACTION_ID)!;
-    await Bun.sleep(15);
-
-    expect(harness.cancellations).toEqual([
-      {
-        origin: "supervisor-operator",
-        reason: "Slack draft actions expired",
-      },
-    ]);
-    await harness.sessions.publish(action(token, draftMessage.ts!));
-    expect(harness.signals).toHaveLength(0);
-    expect(JSON.stringify(harness.updates)).toContain("Expired");
-  });
-
-  test("makes non-owned live posts preview-only and cancels before publish", async () => {
-    const harness = createHarness({ writeMode: "live", authenticatedId: "other" });
-    await harness.sessions.start(startInput());
-    harness.onStepDone("analyze", feedback);
-    await settle();
-
-    expect(harness.cancellations[0]?.reason).toContain("does not own");
-    expect(JSON.stringify(harness.messages.slice(2))).toContain("Preview only");
-    expect(JSON.stringify(harness.messages.slice(2))).not.toContain(
-      DRAFT_PUBLISH_ACTION_ID,
-    );
-    expect(harness.signals).toHaveLength(0);
-  });
-});
-
-describe("feedback Block Kit bounds", () => {
-  test("keeps every dynamic section within Slack limits", () => {
-    const long = "<&>".repeat(2000);
-    const oversized: LaunchFeedback = {
-      ...feedback,
-      summary: long,
-      themes: Array.from({ length: 8 }, (_, index) => ({
-        label: `Theme ${String(index)}`,
-        sentiment: "mixed" as const,
-        summary: long,
-        evidenceUrls: ["https://x.com/user/status/124"],
-      })),
-      faq: Array.from({ length: 8 }, (_, index) => ({
-        question: `Question ${String(index)}`,
-        suggestedAnswer: long,
-        evidenceUrls: ["https://x.com/user/status/124"],
-      })),
-      actions: Array.from({ length: 8 }, (_, index) => ({
-        priority: "medium" as const,
-        owner: "product" as const,
-        action: `${String(index)} ${long}`,
-        evidenceUrls: ["https://x.com/user/status/124"],
-      })),
-    };
-    const blocks = feedbackBriefBlocks(oversized);
-    const sectionLengths = blocks.flatMap((block) => {
-      if (block.type !== "section") return [];
-      const value = "text" in block ? block.text?.text : undefined;
-      return typeof value === "string" ? [value.length] : [];
-    });
-
-    expect(blocks.length).toBeLessThanOrEqual(50);
-    expect(Math.max(...sectionLengths)).toBeLessThanOrEqual(3000);
-    expect(JSON.stringify(blocks)).toContain(
-      "https://x.com/user/status/124",
-    );
-  });
-});
-
-describe("extractXStatusURL", () => {
-  test("extracts and canonicalizes a Slack-formatted status URL", () => {
-    expect(
-      extractXStatusURL(
-        "analyze <https://twitter.com/builder/status/123|twitter.com/builder/status/123>",
-      ),
-    ).toBe("https://x.com/builder/status/123");
-  });
-});
-
-function createHarness(options: {
-  approvalTimeoutMs?: number;
-  writeMode?: "live" | "dry-run";
-  authenticatedId?: string;
-  sendDelayMs?: number;
-  failUpdates?: boolean;
-  updateDelayMs?: number;
-  failSendAt?: number;
-} = {}) {
-  const messages: Array<SlackPostMessage & { ts?: string }> = [];
-  const updates: SlackUpdateMessage[] = [];
-  const modals: unknown[] = [];
-  const signals: Array<{ name: string; payload: unknown }> = [];
-  const cancellations: Array<{ origin: string; reason: string }> = [];
-  const starts: Parameters<StartWorkflow>[0][] = [];
-  let onStepDone: Parameters<StartWorkflow>[0]["onStepDone"] = () => undefined;
-  let sendCount = 0;
-  const complete = deferred<Awaited<WorkflowRun["complete"]>>();
-  const run: WorkflowRun = {
-    runId: "run-1",
-    complete: complete.promise,
-    async signal(name, payload) {
-      signals.push({ name, payload });
-    },
-    async cancel(origin, reason) {
-      cancellations.push({ origin, reason });
-    },
-  };
-  const config = {
-    port: 3001,
-    signingSecret: "secret",
-    botToken: "xoxb-test",
+const result: ReplyTriageResult = {
+  snapshot: {
     source: {
-      id: "openai:test",
-      provider: "openai",
-      baseURL: "https://api.openai.com/v1",
-      apiKey: "test",
-      model: "test",
+      url: "https://x.com/OpenAI/status/123",
+      postId: "123",
+      authorUsername: "OpenAI",
+      text: "Launch",
+      metrics: { replies: 2, likes: 10, reposts: 2, quotes: 1 },
     },
-    contextRoot: "/tmp/launch-feedback-test",
-    approvalTimeoutMs: options.approvalTimeoutMs ?? 60_000,
-    xClient: {
-      writeMode: options.writeMode ?? "dry-run",
-      getMe: async () => ({
-        id: options.authenticatedId ?? "owner",
-        name: "User",
-        username: "user",
-      }),
-      getPost: async () => ({
-        id: feedback.source.postId,
-        url: feedback.source.url,
-        text: feedback.source.text,
-        authorId: feedback.source.authorId,
-        author: {
-          id: feedback.source.authorId,
-          name: "Builder",
-          username: feedback.source.authorUsername,
-        },
-        directReply: false,
-      }),
-      getPostReplies: async () => ({
-        sourcePostId: "123",
-        replies: [],
-        analyzedReplies: 0,
-        truncated: false,
-        coverage: { source: "recent-search", days: 7, complete: false },
-      }),
-      createPost: async () => {
-        throw new Error("not used");
+    coverage: {
+      analyzedReplies: 2,
+      truncated: true,
+      nextToken: "next",
+      searchWindow: "recent-7-days",
+    },
+    replies: [
+      {
+        id: "201",
+        url: "https://x.com/alice/status/201",
+        text: "Can we use the API?",
+        author: { username: "alice", followers: 50, verified: false },
+        metrics: { likes: 2, replies: 0, reposts: 0 },
+        directReply: true,
       },
-    },
-  } satisfies LaunchFeedbackConfig;
-  const sessions = createLaunchFeedbackSessions({
-    config,
-    stderr: () => undefined,
-    startWorkflow(input) {
-      starts.push(input);
-      onStepDone = input.onStepDone;
-      return run;
-    },
-    async sendMessage(_token, message) {
-      sendCount += 1;
-      if (options.sendDelayMs !== undefined) {
-        await Bun.sleep(options.sendDelayMs);
-      }
-      if (options.failSendAt === sendCount) {
-        throw new Error("Slack post unavailable");
-      }
-      const ts = `m${String(messages.length + 1)}`;
-      messages.push({ ...message, ts });
-      return { channel: message.channel, ts };
-    },
-    async updateMessage(_token, message) {
-      updates.push(message);
-      if (options.updateDelayMs !== undefined) {
-        await Bun.sleep(options.updateDelayMs);
-      }
-      if (options.failUpdates === true) {
-        throw new Error("Slack update unavailable");
-      }
-      return { channel: message.channel, ts: message.ts };
-    },
-    async openModal(_token, input) {
-      modals.push(input.view);
-    },
+      {
+        id: "202",
+        url: "https://x.com/bob/status/202",
+        text: "Great work",
+        author: { username: "bob", followers: 20, verified: false },
+        metrics: { likes: 1, replies: 0, reposts: 0 },
+        directReply: true,
+      },
+    ],
+  },
+  triage: {
+    overview: "One question needs a response.",
+    classifications: [
+      {
+        priority: "respond-now",
+        reason: "question",
+        replyURL: "https://x.com/alice/status/201",
+        authorUsername: "alice",
+        summary: "Asked about API access",
+        recommendedOwner: "marketing",
+        suggestedResponseAngle: "Clarify availability.",
+      },
+      {
+        priority: "no-response",
+        reason: "praise",
+        replyURL: "https://x.com/bob/status/202",
+        authorUsername: "bob",
+        summary: "Positive feedback",
+        recommendedOwner: "marketing",
+      },
+    ],
+    themes: [
+      {
+        label: "API access",
+        count: 1,
+        sentiment: "neutral",
+        summary: "A user asked about access.",
+        evidenceURLs: ["https://x.com/alice/status/201"],
+      },
+    ],
+    amplificationOpportunities: [
+      {
+        replyURL: "https://x.com/bob/status/202",
+        reason: "Positive reaction",
+      },
+    ],
+    counts: { respondNow: 1, respondLater: 0, noResponse: 1 },
+  },
+};
+
+type SentMessage = {
+  channel: string;
+  thread_ts?: string;
+  text: string;
+  blocks?: SlackBlock[];
+};
+
+function completedRun(output = result): ReplyTriageRun {
+  return {
+    complete: Promise.resolve({
+      runId: "completed-run",
+      terminalStatus: "completed",
+      outputs: { triage: output },
+      events: [],
+    }),
+  };
+}
+
+describe("reply triage Slack sessions", () => {
+  test("rejects invalid URLs before workflow execution", async () => {
+    let starts = 0;
+    const messages: SentMessage[] = [];
+    const sessions = createReplyTriageSessions({
+      config,
+      stderr: () => undefined,
+      startWorkflow: (() => {
+        starts += 1;
+        return completedRun();
+      }) as StartWorkflow,
+      sendMessage: async (_token, message) => {
+        messages.push(message);
+        return { channel: message.channel, ts: "1" };
+      },
+    });
+
+    for (const prompt of ["analyze 123", "analyze https://x.com/example"]) {
+      await sessions.start({
+        teamId: "T1",
+        channel: "C1",
+        threadTs: prompt,
+        prompt,
+      });
+    }
+
+    expect(starts).toBe(0);
+    expect(messages).toHaveLength(2);
+    expect(messages.every((message) => message.text.includes("status URL"))).toBe(
+      true,
+    );
   });
 
-  return {
-    sessions,
-    messages,
-    updates,
-    modals,
-    signals,
-    cancellations,
-    starts,
-    get onStepDone() {
-      return onStepDone;
-    },
-    finish(outputs: Record<string, unknown>) {
-      complete.resolve({
-        runId: "run-1",
-        terminalStatus: "completed",
-        outputs,
-        events: [],
-      });
-    },
-  };
-}
+  test("posts one started message and one compact terminal result", async () => {
+    const messages: SentMessage[] = [];
+    const sessions = createReplyTriageSessions({
+      config,
+      stderr: () => undefined,
+      startWorkflow: () => completedRun(),
+      sendMessage: async (_token, message) => {
+        messages.push(message);
+        return { channel: message.channel, ts: String(messages.length) };
+      },
+    });
 
-function startInput(prompt = "analyze https://x.com/builder/status/123") {
-  return {
-    teamId: "T1",
-    channel: "C1",
-    threadTs: "100.1",
-    prompt,
-    userId: "U1",
-  };
-}
+    await sessions.start({
+      teamId: "T1",
+      channel: "C1",
+      threadTs: "1.1",
+      prompt: "triage https://x.com/OpenAI/status/123",
+      userId: "U1",
+    });
+    await waitFor(() => messages.length === 2);
 
-function action(
-  value: string,
-  messageTs: string,
-  overrides: Partial<SlackBlockAction> = {},
-) {
-  return {
-    actionId: "test",
-    value,
-    teamId: "T1",
-    userId: "U1",
-    channelId: "C1",
-    messageTs,
-    ...overrides,
-  };
-}
+    expect(messages.map((message) => message.text)).toEqual([
+      "Analyzing recent replies to https://x.com/OpenAI/status/123",
+      "Reply triage complete: 1 respond now, 0 respond later",
+    ]);
+    expect(JSON.stringify(messages[1]?.blocks)).not.toContain('"actions"');
+    expect(JSON.stringify(messages[1]?.blocks)).not.toContain("Publish");
+  });
 
-function findAction(blocks: unknown, actionId: string): string | undefined {
-  if (!Array.isArray(blocks)) return undefined;
-  for (const block of blocks) {
-    if (block === null || typeof block !== "object") continue;
-    const elements = (block as { elements?: unknown }).elements;
-    if (!Array.isArray(elements)) continue;
-    for (const element of elements) {
+  test("reserves a thread atomically and releases it after completion", async () => {
+    const pending = deferred<Awaited<ReplyTriageRun["complete"]>>();
+    let starts = 0;
+    const messages: SentMessage[] = [];
+    const startWorkflow: StartWorkflow = () => {
+      starts += 1;
+      return starts === 1
+        ? { complete: pending.promise }
+        : completedRun();
+    };
+    const sessions = createReplyTriageSessions({
+      config,
+      stderr: () => undefined,
+      startWorkflow,
+      sendMessage: async (_token, message) => {
+        messages.push(message);
+        return { channel: message.channel, ts: String(messages.length) };
+      },
+    });
+    const input = {
+      teamId: "T1",
+      channel: "C1",
+      threadTs: "2.2",
+      prompt: "triage https://x.com/OpenAI/status/123",
+    };
+
+    await sessions.start(input);
+    await sessions.start(input);
+    expect(starts).toBe(1);
+    expect(messages.at(-1)?.text).toContain("already active");
+
+    pending.resolve({
+      runId: "pending-run",
+      terminalStatus: "completed",
+      outputs: { triage: result },
+      events: [],
+    });
+    await waitFor(() => messages.some((message) => message.text.startsWith("Reply triage complete")));
+    await sessions.start(input);
+    expect(starts).toBe(2);
+  });
+
+  test("releases the reservation and reports one terminal failure", async () => {
+    let starts = 0;
+    const messages: SentMessage[] = [];
+    const sessions = createReplyTriageSessions({
+      config,
+      stderr: () => undefined,
+      startWorkflow: () => {
+        starts += 1;
+        return starts === 1
+          ? ({
+              complete: Promise.resolve({
+                runId: "failed-run",
+                terminalStatus: "failed",
+                outputs: {},
+                events: [],
+              }),
+            } satisfies ReplyTriageRun)
+          : completedRun();
+      },
+      sendMessage: async (_token, message) => {
+        messages.push(message);
+        return { channel: message.channel, ts: String(messages.length) };
+      },
+    });
+    const input = {
+      teamId: "T1",
+      channel: "C1",
+      threadTs: "3.3",
+      prompt: "triage https://x.com/OpenAI/status/123",
+    };
+
+    await sessions.start(input);
+    await waitFor(() => messages.some((message) => message.text.includes("failed")));
+    await Bun.sleep(0);
+    await sessions.start(input);
+
+    expect(starts).toBe(2);
+    expect(messages.filter((message) => message.text.includes("failed"))).toHaveLength(
+      1,
+    );
+  });
+});
+
+describe("reply triage Block Kit", () => {
+  test("contains no interactive elements and stays within Slack limits", () => {
+    const blocks = triageResultBlocks(result);
+    expect(JSON.stringify(blocks)).not.toContain('"type":"actions"');
+    expect(blocks.length).toBeLessThanOrEqual(50);
+    for (const block of blocks) {
       if (
-        element !== null &&
-        typeof element === "object" &&
-        (element as { action_id?: unknown }).action_id === actionId
+        block.type === "section" &&
+        "text" in block &&
+        block.text !== undefined &&
+        block.text.type === "mrkdwn"
       ) {
-        return (element as { value?: string }).value;
+        expect(block.text.text.length).toBeLessThanOrEqual(3000);
       }
     }
-  }
-  return undefined;
-}
+  });
+});
+
+test("extractXStatusURL canonicalizes Slack-formatted URLs", () => {
+  expect(
+    extractXStatusURL(
+      "triage <https://twitter.com/OpenAI/status/123?s=20|this post>",
+    ),
+  ).toBe("https://x.com/OpenAI/status/123");
+});
 
 function deferred<T>() {
-  let resolve: (value: T) => void = () => undefined;
+  let resolve!: (value: T) => void;
   const promise = new Promise<T>((innerResolve) => {
     resolve = innerResolve;
   });
   return { promise, resolve };
 }
 
-async function settle(): Promise<void> {
-  await Bun.sleep(0);
-  await Bun.sleep(0);
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await Bun.sleep(1);
+  }
+  throw new Error("condition was not reached");
 }

@@ -1,61 +1,57 @@
-import {
-  defineTool,
-  type BaseEnv,
-} from "@intx/agent";
+import { defineTool, type BaseEnv } from "@intx/agent";
 
-import type {
-  ApprovedDraft,
-  LaunchFeedback,
-  PostReceipt,
-  XPost,
-  XReplyCollection,
-} from "./types";
+import type { ReplySnapshot, ReplyTriage, XPost, XReplyCollection } from "./types";
 import {
-  parseLaunchFeedback,
+  createReplySnapshot,
+  parseReplyTriage,
   parseXStatusURL,
-  validatePostText,
 } from "./validation";
-import type { XClient } from "./x-client";
+import {
+  DEFAULT_REPLY_SAMPLE_SIZE,
+  type XReadClient,
+} from "./x-client";
 
 export const X_GET_POST_TOOL = "x_get_post";
 export const X_GET_POST_REPLIES_TOOL = "x_get_post_replies";
-export const LAUNCH_PRESENT_FEEDBACK_TOOL = "launch_present_feedback";
-export const X_CREATE_POST_TOOL = "x_create_post";
+export const REPLIES_RETURN_SNAPSHOT_TOOL = "replies_return_snapshot";
+export const REPLIES_PRESENT_TRIAGE_TOOL = "replies_present_triage";
 
-export type AnalysisState = {
-  sourceURL?: string;
+export type CollectState = {
+  expectedURL: string;
   source?: XPost;
   replies?: XReplyCollection;
+  snapshotReturned: boolean;
 };
 
-export function createAnalysisState(expectedURL?: string): AnalysisState {
-  return expectedURL === undefined
-    ? {}
-    : { sourceURL: parseXStatusURL(expectedURL).canonicalURL };
+export function createCollectState(expectedURL: string): CollectState {
+  return {
+    expectedURL: parseXStatusURL(expectedURL).canonicalURL,
+    snapshotReturned: false,
+  };
 }
 
-type AnalyzeXEnv = BaseEnv & {
-  xClient: XClient;
-  analysisState: AnalysisState;
-  feedbackSink: (feedback: LaunchFeedback) => void;
+export type CollectEnv = BaseEnv & {
+  xClient: XReadClient;
+  collectState: CollectState;
+  snapshotSink: (snapshot: ReplySnapshot) => void;
 };
 
-export function createAnalyzeXTools() {
-  return defineTool<AnalyzeXEnv>({
-    id: "@corbits/example-launch-feedback/analyze-x",
-    requires: ["xClient", "analysisState", "feedbackSink"],
+export function createCollectXTools() {
+  return defineTool<CollectEnv>({
+    id: "@corbits/example-reply-triage/collect",
+    requires: ["xClient", "collectState", "snapshotSink"],
     factory: (env) => ({
       definitions: [
         {
           name: X_GET_POST_TOOL,
           description:
-            "Retrieve one X post and its expanded author from a full X status URL.",
+            "Retrieve the source X post and expanded author from the trigger status URL.",
           inputSchema: urlInputSchema,
         },
         {
           name: X_GET_POST_REPLIES_TOOL,
           description:
-            "Retrieve up to 100 recent replies in the conversation for the same X status URL.",
+            "Retrieve a bounded sample of recent replies for the already-loaded source post.",
           inputSchema: {
             type: "object",
             properties: {
@@ -63,7 +59,7 @@ export function createAnalyzeXTools() {
               maxResults: {
                 type: "integer",
                 minimum: 10,
-                maximum: 100,
+                maximum: DEFAULT_REPLY_SAMPLE_SIZE,
               },
             },
             required: ["url"],
@@ -71,178 +67,129 @@ export function createAnalyzeXTools() {
           },
         },
         {
-          name: LAUNCH_PRESENT_FEEDBACK_TOOL,
+          name: REPLIES_RETURN_SNAPSHOT_TOOL,
           description:
-            "Submit the final launch analysis, evidence reply ids, actions, FAQ, and exactly three drafts.",
-          inputSchema: launchFeedbackInputSchema,
-        },
-      ],
-      async run(call, signal) {
-        try {
-          if (call.name === X_GET_POST_TOOL) {
-            const ref = parseXStatusURL(call.arguments.url);
-            assertSameSource(env.analysisState, ref.canonicalURL);
-            const post = await env.xClient.getPost(ref.canonicalURL, signal);
-            env.analysisState.sourceURL = ref.canonicalURL;
-            env.analysisState.source = post;
-            return success(call.id, post);
-          }
-
-          if (call.name === X_GET_POST_REPLIES_TOOL) {
-            const ref = parseXStatusURL(call.arguments.url);
-            assertSameSource(env.analysisState, ref.canonicalURL);
-            if (env.analysisState.source === undefined) {
-              throw new Error("Call x_get_post before x_get_post_replies");
-            }
-            const maxResults =
-              typeof call.arguments.maxResults === "number"
-                ? call.arguments.maxResults
-                : 100;
-            const replies = await env.xClient.getPostReplies({
-              url: ref.canonicalURL,
-              maxResults,
-              signal,
-            });
-            if (replies.sourcePostId !== env.analysisState.source.id) {
-              throw new Error("Reply search source does not match the loaded post");
-            }
-            env.analysisState.replies = replies;
-            return success(call.id, replies);
-          }
-
-          if (call.name === LAUNCH_PRESENT_FEEDBACK_TOOL) {
-            const source = env.analysisState.source;
-            const replies = env.analysisState.replies;
-            if (source === undefined || replies === undefined) {
-              throw new Error(
-                "Call x_get_post and x_get_post_replies before presenting feedback",
-              );
-            }
-            const feedback = parseLaunchFeedback(call.arguments, {
-              source,
-              replies,
-            });
-            env.feedbackSink(feedback);
-            return success(call.id, feedback, "Launch feedback accepted");
-          }
-
-          return errorResult(call.id, `Unknown tool: ${call.name}`);
-        } catch (error) {
-          return errorResult(call.id, errorMessage(error));
-        }
-      },
-    }),
-  });
-}
-
-export type ApprovedDraftCapability = {
-  readonly approved: Readonly<ApprovedDraft>;
-  readonly consumed: boolean;
-  compareAndConsume: (
-    normalizedText: string,
-  ) => { approved: Readonly<ApprovedDraft>; error?: undefined } | { error: string };
-};
-
-export function createApprovedDraftCapability(
-  approved: ApprovedDraft,
-): ApprovedDraftCapability {
-  const frozen = Object.freeze({ ...approved });
-  let available = true;
-
-  return {
-    approved: frozen,
-    get consumed() {
-      return !available;
-    },
-    compareAndConsume(normalizedText) {
-      if (!available) return { error: "Approved draft was already consumed" };
-      if (normalizedText !== frozen.text) {
-        return { error: "Tool text does not match the Slack-approved draft" };
-      }
-      available = false;
-      return { approved: frozen };
-    },
-  };
-}
-
-type PublishXEnv = BaseEnv & {
-  xClient: XClient;
-  approvedDraft: ApprovedDraftCapability;
-  receiptSink: (receipt: PostReceipt) => void;
-};
-
-export function createCreatePostTool() {
-  return defineTool<PublishXEnv>({
-    id: "@corbits/example-launch-feedback/create-post",
-    requires: ["xClient", "approvedDraft", "receiptSink"],
-    factory: (env) => ({
-      definitions: [
-        {
-          name: X_CREATE_POST_TOOL,
-          description:
-            "Create the exact follow-up post selected and approved in Slack.",
+            "Return the trusted normalized source-and-replies snapshot after both X reads complete.",
           inputSchema: {
             type: "object",
-            properties: { text: { type: "string" } },
-            required: ["text"],
+            properties: {},
             additionalProperties: false,
           },
         },
       ],
       async run(call, signal) {
-        if (call.name !== X_CREATE_POST_TOOL) {
-          return errorResult(call.id, `Unknown tool: ${call.name}`);
-        }
-        if (signal.aborted) {
-          return errorResult(call.id, "Create post was cancelled");
-        }
-        const validation = validatePostText(call.arguments.text);
-        if (validation.error !== undefined) {
-          return errorResult(call.id, validation.error);
-        }
-        const consumed = env.approvedDraft.compareAndConsume(validation.text);
-        if (consumed.error !== undefined) {
-          return errorResult(call.id, consumed.error);
-        }
-
         try {
-          const receipt = await env.xClient.createPost(validation.text, signal);
-          let warning: string | undefined;
-          try {
-            env.receiptSink(receipt);
-          } catch (error) {
-            warning = `receipt sink failed: ${errorMessage(error)}`;
+          if (call.name === X_GET_POST_TOOL) {
+            assertTriggerURL(env.collectState, call.arguments.url);
+            if (env.collectState.source !== undefined) {
+              throw new Error("x_get_post may be called only once");
+            }
+            env.collectState.source = await env.xClient.getPost(
+              env.collectState.expectedURL,
+              signal,
+            );
+            return success(call.id, env.collectState.source);
           }
-          return success(
-            call.id,
-            receipt,
-            warning === undefined
-              ? JSON.stringify(receipt)
-              : `${JSON.stringify(receipt)}\nWarning: ${warning}`,
-          );
+
+          if (call.name === X_GET_POST_REPLIES_TOOL) {
+            assertTriggerURL(env.collectState, call.arguments.url);
+            if (env.collectState.source === undefined) {
+              throw new Error("Call x_get_post before x_get_post_replies");
+            }
+            if (env.collectState.replies !== undefined) {
+              throw new Error("x_get_post_replies may be called only once");
+            }
+            env.collectState.replies = await env.xClient.getPostReplies({
+              url: env.collectState.expectedURL,
+              maxResults: Math.min(
+                typeof call.arguments.maxResults === "number"
+                  ? call.arguments.maxResults
+                  : DEFAULT_REPLY_SAMPLE_SIZE,
+                DEFAULT_REPLY_SAMPLE_SIZE,
+              ),
+              signal,
+            });
+            return success(call.id, env.collectState.replies);
+          }
+
+          if (call.name === REPLIES_RETURN_SNAPSHOT_TOOL) {
+            if (env.collectState.snapshotReturned) {
+              throw new Error("replies_return_snapshot may be called only once");
+            }
+            if (
+              env.collectState.source === undefined ||
+              env.collectState.replies === undefined
+            ) {
+              throw new Error(
+                "Call x_get_post and x_get_post_replies before returning the snapshot",
+              );
+            }
+            const snapshot = createReplySnapshot(
+              env.collectState.source,
+              env.collectState.replies,
+              env.collectState.expectedURL,
+            );
+            env.collectState.snapshotReturned = true;
+            env.snapshotSink(snapshot);
+            return success(call.id, snapshot, "Reply snapshot accepted");
+          }
+
+          return failure(call.id, `Unknown tool: ${call.name}`);
         } catch (error) {
-          return errorResult(call.id, errorMessage(error));
+          return failure(call.id, errorMessage(error));
         }
       },
     }),
   });
 }
 
-function assertSameSource(state: AnalysisState, canonicalURL: string): void {
-  if (state.sourceURL !== undefined && state.sourceURL !== canonicalURL) {
-    throw new Error("All launch analysis tools must use the same X status URL");
+export type TriageEnv = BaseEnv & {
+  snapshot: ReplySnapshot;
+  triageSink: (triage: ReplyTriage) => void;
+};
+
+export function createTriageTools() {
+  return defineTool<TriageEnv>({
+    id: "@corbits/example-reply-triage/present",
+    requires: ["snapshot", "triageSink"],
+    factory: (env) => ({
+      definitions: [
+        {
+          name: REPLIES_PRESENT_TRIAGE_TOOL,
+          description:
+            "Submit one evidence-bound classification for every collected reply plus themes and amplification opportunities.",
+          inputSchema: triageInputSchema,
+        },
+      ],
+      async run(call) {
+        if (call.name !== REPLIES_PRESENT_TRIAGE_TOOL) {
+          return failure(call.id, `Unknown tool: ${call.name}`);
+        }
+        try {
+          const triage = parseReplyTriage(call.arguments, env.snapshot);
+          env.triageSink(triage);
+          return success(call.id, triage, "Reply triage accepted");
+        } catch (error) {
+          return failure(call.id, errorMessage(error));
+        }
+      },
+    }),
+  });
+}
+
+function assertTriggerURL(state: CollectState, value: unknown): void {
+  const actual = parseXStatusURL(value);
+  const expected = parseXStatusURL(state.expectedURL);
+  if (actual.postId !== expected.postId) {
+    throw new Error("All collection tools must use the trigger URL");
   }
 }
 
 function success(callId: string, detail: unknown, content?: string) {
-  return {
-    callId,
-    content: content ?? JSON.stringify(detail),
-    detail,
-  };
+  return { callId, content: content ?? JSON.stringify(detail), detail };
 }
 
-function errorResult(callId: string, content: string) {
+function failure(callId: string, content: string) {
   return { callId, content, isError: true as const };
 }
 
@@ -257,16 +204,53 @@ const urlInputSchema = {
   additionalProperties: false,
 } as const;
 
-const evidenceSchema = {
-  type: "array",
-  maxItems: 5,
-  items: { type: "string" },
-} as const;
+const replyIdSchema = { type: "string" } as const;
 
-const launchFeedbackInputSchema = {
+const triageInputSchema = {
   type: "object",
   properties: {
-    summary: { type: "string" },
+    overview: { type: "string" },
+    classifications: {
+      type: "array",
+      maxItems: 100,
+      items: {
+        type: "object",
+        properties: {
+          replyId: replyIdSchema,
+          priority: {
+            type: "string",
+            enum: ["respond-now", "respond-later", "no-response"],
+          },
+          reason: {
+            type: "string",
+            enum: [
+              "question",
+              "complaint",
+              "purchase-intent",
+              "feature-request",
+              "misinformation",
+              "high-reach-author",
+              "praise",
+              "spam",
+            ],
+          },
+          summary: { type: "string" },
+          recommendedOwner: {
+            type: "string",
+            enum: ["marketing", "support", "product"],
+          },
+          suggestedResponseAngle: { type: "string" },
+        },
+        required: [
+          "replyId",
+          "priority",
+          "reason",
+          "summary",
+          "recommendedOwner",
+        ],
+        additionalProperties: false,
+      },
+    },
     themes: {
       type: "array",
       maxItems: 8,
@@ -274,68 +258,48 @@ const launchFeedbackInputSchema = {
         type: "object",
         properties: {
           label: { type: "string" },
+          count: { type: "integer", minimum: 1 },
           sentiment: {
             type: "string",
             enum: ["positive", "mixed", "negative", "neutral"],
           },
           summary: { type: "string" },
-          evidencePostIds: evidenceSchema,
+          evidenceReplyIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 5,
+            items: replyIdSchema,
+          },
         },
-        required: ["label", "sentiment", "summary", "evidencePostIds"],
+        required: [
+          "label",
+          "count",
+          "sentiment",
+          "summary",
+          "evidenceReplyIds",
+        ],
         additionalProperties: false,
       },
     },
-    faq: {
+    amplificationOpportunities: {
       type: "array",
       maxItems: 8,
       items: {
         type: "object",
         properties: {
-          question: { type: "string" },
-          suggestedAnswer: { type: "string" },
-          evidencePostIds: evidenceSchema,
+          replyId: replyIdSchema,
+          reason: { type: "string" },
         },
-        required: ["question", "suggestedAnswer", "evidencePostIds"],
-        additionalProperties: false,
-      },
-    },
-    actions: {
-      type: "array",
-      maxItems: 8,
-      items: {
-        type: "object",
-        properties: {
-          priority: { type: "string", enum: ["high", "medium", "low"] },
-          owner: {
-            type: "string",
-            enum: ["product", "support", "marketing"],
-          },
-          action: { type: "string" },
-          evidencePostIds: evidenceSchema,
-        },
-        required: ["priority", "owner", "action", "evidencePostIds"],
-        additionalProperties: false,
-      },
-    },
-    drafts: {
-      type: "array",
-      minItems: 3,
-      maxItems: 3,
-      items: {
-        type: "object",
-        properties: {
-          strategy: {
-            type: "string",
-            enum: ["concise-recap", "what-we-heard", "next-steps"],
-          },
-          title: { type: "string" },
-          text: { type: "string" },
-        },
-        required: ["strategy", "title", "text"],
+        required: ["replyId", "reason"],
         additionalProperties: false,
       },
     },
   },
-  required: ["summary", "themes", "faq", "actions", "drafts"],
+  required: [
+    "overview",
+    "classifications",
+    "themes",
+    "amplificationOpportunities",
+  ],
   additionalProperties: false,
 } as const;

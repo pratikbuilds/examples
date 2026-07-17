@@ -1,18 +1,21 @@
-# Slack launch feedback workflow
+# Slack X reply triage workflow
 
-A real `@intx/workflow` that turns one X launch-post URL into a recent-reply
-brief, three follow-up drafts, and a Slack-controlled optional publication.
+A small, read-only `@intx/workflow` for marketing teams. Give the Slack app one
+full X status URL and it returns the recent replies that need attention,
+recurring themes, and positive replies worth amplifying.
 
 ```text
-Slack URL -> analyze -> awaitSignal("draft-action") -> gate
-                                                    |-> publish -> x_create_post
-                                                    `-> complete without posting
+Slack X status URL -> collect -> triage -> complete
+                       |           |
+                       |           `- replies_present_triage
+                       `- x_get_post
+                          x_get_post_replies
+                          replies_return_snapshot
 ```
 
-The analysis agent has `x_get_post`, `x_get_post_replies`, and
-`launch_present_feedback`. It cannot call `x_create_post`. The publishing agent
-is instantiated only after a Slack Publish action resumes the workflow, and it
-receives only `x_create_post`.
+There are no drafts, approval buttons, parked runs, or X mutations. The collect
+agent can only read X. The triage agent receives the validated collect output,
+has no X client, and can only submit an evidence-bound triage result.
 
 ## Setup
 
@@ -24,67 +27,59 @@ cd starter/slack/workflows/launch-feedback
 cp .env.example .env
 ```
 
-Import `manifest.slack.json` into Slack, enable Socket Mode and interactivity,
-install or reinstall the app, and invite it to the test channel. Configure all
-four X credentials because post and reply reads are live even when publication
-is dry-run.
+Import `manifest.slack.json` into Slack, enable Socket Mode, install or reinstall
+the app, and invite it to the test channel. Configure the Slack, model, and four
+X OAuth credentials in `.env`. X credentials are used only for live reads.
 
-## Run safely
+## Run
 
 ```bash
-X_DRY_RUN=1 bun run start
+cd starter/slack/workflows/launch-feedback
+bun run start
 ```
 
-Expected startup output includes:
+Expected startup output:
 
 ```text
-slack-launch-feedback connected to Slack with Socket Mode
+slack-x-reply-triage connected to Slack with Socket Mode
 HTTP receiver: not required for Slack events in Socket Mode
-X reader=live, publisher=dry-run
+X reader=live, mutations=disabled
 ```
 
-Then send a full status URL:
+Then mention the app with a full public status URL:
 
 ```text
-@interchange-launch-feedback analyze the replies to https://x.com/user/status/123
+@interchange-reply-triage triage the replies to https://x.com/OpenAI/status/2077446718728425686
 ```
 
-Slack renders the coverage limitation, brief, evidence links, and exactly three
-draft cards. Edit updates only local draft state and increments its revision.
-Skip signals the workflow only after all three cards are skipped. Publish sends
-the selected text and revision through `draft-action`; the create tool rejects
-any model-modified text.
+Use a recent third-party post with substantial replies because X recent search
+is limited to approximately the last seven days. The workflow analyzes a
+bounded sample of 25 recent replies so the result stays fast and readable;
+Slack shows both the sample size and X's source-level reply count. Slack first
+posts a started message, then one compact result with coverage, response
+priorities, owners, themes, and evidence links.
 
-## Safety properties
+## Safety and coverage
 
-- URL-only input: IDs and profile URLs fail before model or X calls.
-- Recent-search coverage is always labeled as incomplete and limited to seven
-  days; an empty result never claims that no replies exist historically.
-- Action values are opaque, one-shot tokens bound to Slack team, channel, and
-  message timestamp.
-- Publish-step delivery is deduplicated in the local process by workflow run,
-  draft ID, and revision.
-- `X_DRY_RUN` defaults to safe mode; only the exact value `0` enables writes.
-- Live publication is disabled when the authenticated X account does not own
-  the source post.
-- Pending cards expire and cancel the parked local workflow.
+- IDs and profile URLs fail before any model or X call.
+- Both X tools are bound to the canonical trigger post ID.
+- The normalized snapshot is built from trusted X responses, not model fields.
+- Every collected reply is classified exactly once; counts are derived.
+- Every theme and amplification link must come from the collected snapshot.
+- Empty recent-search results never claim that the post historically had no replies.
+- This package has no X write client or mutation tool.
 
 ## Tests and builds
 
 ```bash
 bun test src
 bun test ../../bridge/src
-bun test ../post-to-x/src
 
-bun build src/cli.ts --target bun --outdir /tmp/launch-feedback-build
-bun build ../post-to-x/src/cli.ts --target bun --outdir /tmp/post-to-x-build
+bun build src/cli.ts --target bun --outdir /tmp/reply-triage-build
 ```
 
 ## Local limitation
 
-The Slack session registry, pending signal, and publish-delivery deduplication
-are process-local. Restarting the process loses pending approvals. X does not
-provide an idempotency key for create-post requests, so a crash after X accepts
-a post but before the receipt is stored cannot be made exactly-once by this
-local example. A hosted version needs durable session and receipt storage plus
-operator reconciliation.
+The in-flight Slack thread reservation is process-local. Restarting the process
+forgets active runs, but completed output remains in Slack. The workflow itself
+does not park or wait for user action.

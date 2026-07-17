@@ -1,15 +1,15 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 
 import type {
   XCredentials,
   XPost,
-  PostReceipt,
   XReplyCollection,
   XUser,
 } from "./types";
 import { parseXStatusURL } from "./validation";
 
 const API_ORIGIN = "https://api.x.com";
+export const DEFAULT_REPLY_SAMPLE_SIZE = 25;
 
 export type Fetch = (
   input: string | URL | Request,
@@ -23,12 +23,6 @@ export type XReadClient = {
     maxResults?: number;
     signal?: AbortSignal;
   }) => Promise<XReplyCollection>;
-};
-
-export type XClient = XReadClient & {
-  writeMode: "live" | "dry-run";
-  getMe: (signal?: AbortSignal) => Promise<XUser>;
-  createPost: (text: string, signal?: AbortSignal) => Promise<PostReceipt>;
 };
 
 export class XAPIError extends Error {
@@ -90,7 +84,10 @@ export function createXReader(
   }): Promise<XReplyCollection> {
     const ref = parseXStatusURL(input.url);
     const endpoint = new URL("/2/tweets/search/recent", API_ORIGIN);
-    endpoint.searchParams.set("query", `conversation_id:${ref.postId}`);
+    endpoint.searchParams.set(
+      "query",
+      `conversation_id:${ref.postId} is:reply`,
+    );
     endpoint.searchParams.set(
       "tweet.fields",
       "author_id,conversation_id,created_at,in_reply_to_user_id,public_metrics,referenced_tweets",
@@ -135,81 +132,6 @@ export function createXReader(
   return { getPost, getPostReplies };
 }
 
-export function createXClient(
-  opts: {
-    credentials: XCredentials;
-    writeMode: "live" | "dry-run";
-  },
-  fetchImpl: Fetch = fetch,
-): XClient {
-  const reader = createXReader(opts.credentials, fetchImpl);
-
-  async function getMe(signal?: AbortSignal): Promise<XUser> {
-    const endpoint = new URL("/2/users/me", API_ORIGIN);
-    endpoint.searchParams.set(
-      "user.fields",
-      "id,name,username,profile_image_url,public_metrics,verified",
-    );
-    const payload = await requestJSON(
-      "GET",
-      endpoint,
-      opts.credentials,
-      fetchImpl,
-      signal,
-    );
-    const root = requiredRecord(payload, "X user response");
-    return parseUser(requiredRecord(root.data, "X user response data"));
-  }
-
-  async function createPost(
-    text: string,
-    signal?: AbortSignal,
-  ): Promise<PostReceipt> {
-    if (opts.writeMode === "dry-run") {
-      const postId = `dryrun-${randomUUID()}`;
-      return {
-        mode: "dry-run",
-        postId,
-        url: `https://x.com/i/web/status/${postId}`,
-        text,
-        postedAt: new Date().toISOString(),
-      };
-    }
-
-    const endpoint = new URL("/2/tweets", API_ORIGIN);
-    const payload = await requestJSON(
-      "POST",
-      endpoint,
-      opts.credentials,
-      fetchImpl,
-      signal,
-      { text },
-    );
-    const root = requiredRecord(payload, "X create post response");
-    const data = requiredRecord(root.data, "X create post response data");
-    const postId = requiredString(data.id, "X create post response data.id");
-    const returnedText = requiredString(
-      data.text,
-      "X create post response data.text",
-    );
-
-    return {
-      mode: "live",
-      postId,
-      url: `https://x.com/i/web/status/${postId}`,
-      text: returnedText,
-      postedAt: new Date().toISOString(),
-    };
-  }
-
-  return {
-    ...reader,
-    writeMode: opts.writeMode,
-    getMe,
-    createPost,
-  };
-}
-
 export function resolveCredentials(
   env: NodeJS.ProcessEnv,
 ): XCredentials | undefined {
@@ -230,16 +152,6 @@ export function resolveCredentials(
     return undefined;
   }
   return { apiKey, apiSecret, accessToken, accessTokenSecret };
-}
-
-export function resolveWriteMode(
-  value: string | undefined,
-): { mode: "live" | "dry-run"; error?: undefined } | { error: string } {
-  if (value === undefined || value === "" || value === "1") {
-    return { mode: "dry-run" };
-  }
-  if (value === "0") return { mode: "live" };
-  return { error: 'X_DRY_RUN must be "1" (safe) or "0" (live)' };
 }
 
 export function buildOAuthHeader(
@@ -298,21 +210,18 @@ export function percentEncode(value: string): string {
 }
 
 async function requestJSON(
-  method: "GET" | "POST",
+  method: "GET",
   url: URL,
   credentials: XCredentials,
   fetchImpl: Fetch,
   signal?: AbortSignal,
-  body?: Record<string, unknown>,
 ): Promise<unknown> {
   const response = await fetchImpl(url, {
     method,
     headers: {
       Authorization: buildOAuthHeader(method, url.href, credentials),
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     signal,
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const responseBody = await response.text();
 
@@ -449,7 +358,9 @@ function parseRateLimit(headers: Headers): XAPIError["rateLimit"] {
 }
 
 function clampMaxResults(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return 100;
+  if (value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_REPLY_SAMPLE_SIZE;
+  }
   return Math.min(100, Math.max(10, Math.trunc(value)));
 }
 

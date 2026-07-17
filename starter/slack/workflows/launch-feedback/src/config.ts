@@ -10,26 +10,24 @@ import {
 } from "@corbits/example-slack-bridge";
 
 import {
-  createXClient,
+  createXReader,
   resolveCredentials,
-  resolveWriteMode,
-  type XClient,
+  type XReadClient,
 } from "./x-client";
 
-export const SERVICE_NAME = "slack-launch-feedback";
+export const SERVICE_NAME = "slack-x-reply-triage";
 
-export type LaunchFeedbackConfig = SlackConnectionConfig & {
+export type ReplyTriageConfig = SlackConnectionConfig & {
   source: Source;
-  xClient: XClient;
+  xClient: XReadClient;
   contextRoot: string;
-  approvalTimeoutMs: number;
 };
 
 export function resolveConfig(
   env: NodeJS.ProcessEnv,
   contextRootOverride?: string,
 ):
-  | { config: LaunchFeedbackConfig; error?: undefined }
+  | { config: ReplyTriageConfig; error?: undefined }
   | { config?: undefined; error: string } {
   const slack = resolveSlackConnection(env);
   if (slack.error !== undefined) return { error: slack.error };
@@ -42,23 +40,14 @@ export function resolveConfig(
         "X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, and X_ACCESS_TOKEN_SECRET are required.\n",
     };
   }
-  const writeMode = resolveWriteMode(env.X_DRY_RUN);
-  if (writeMode.error !== undefined) return { error: writeMode.error + "\n" };
 
   return {
     config: {
       ...slack.config,
       source: source.source,
-      xClient: createXClient({ credentials, writeMode: writeMode.mode }),
+      xClient: createXReader(credentials),
       contextRoot:
         contextRootOverride ?? join(process.cwd(), "tmp", SERVICE_NAME),
-      approvalTimeoutMs: positiveInteger(env.APPROVAL_TIMEOUT_MS, 300_000),
     },
   };
-}
-
-function positiveInteger(value: string | undefined, fallback: number): number {
-  if (value === undefined || value === "") return fallback;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }

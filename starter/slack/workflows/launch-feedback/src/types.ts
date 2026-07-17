@@ -139,74 +139,7 @@ export type ReplyTriage = {
   };
 };
 
-export type FollowUpDraft = {
-  strategy: "concise-recap" | "what-we-heard" | "next-steps";
-  title: string;
-  text: string;
-};
-
-export type LaunchFeedback = {
-  source: {
-    url: string;
-    postId: string;
-    authorId: string;
-    authorUsername: string;
-    text: string;
-  };
-  coverage: {
-    analyzedReplies: number;
-    truncated: boolean;
-    nextToken?: string;
-    searchWindow: "recent-7-days";
-  };
-  summary: string;
-  themes: Array<{
-    label: string;
-    sentiment: "positive" | "mixed" | "negative" | "neutral";
-    summary: string;
-    evidenceUrls: string[];
-  }>;
-  faq: Array<{
-    question: string;
-    suggestedAnswer: string;
-    evidenceUrls: string[];
-  }>;
-  actions: Array<{
-    priority: "high" | "medium" | "low";
-    owner: "product" | "support" | "marketing";
-    action: string;
-    evidenceUrls: string[];
-  }>;
-  drafts: [FollowUpDraft, FollowUpDraft, FollowUpDraft];
-};
-
-export type LaunchFeedbackTrigger = {
-  url: string;
-  request: string;
-  slack: {
-    teamId?: string;
-    channel: string;
-    threadTs: string;
-    requestedBy?: string;
-  };
-};
-
-export type DraftActionSignal =
-  | ({ publish: true } & ApprovedDraft)
-  | { publish: false; reason: "all-drafts-skipped" };
-
-export type ApprovedDraft = {
-  draftId: string;
-  revision: number;
-  text: string;
-  approvedBy: string;
-  approvedAt: string;
-};
-
-export type PostReceipt = {
-  mode: "live" | "dry-run";
-  postId: string;
-  url: string;
-  text: string;
-  postedAt: string;
+export type ReplyTriageResult = {
+  snapshot: ReplySnapshot;
+  triage: ReplyTriage;
 };

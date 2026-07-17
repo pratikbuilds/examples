@@ -2,14 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   createReplySnapshot,
-  parseLaunchFeedback,
   parseReplyTriage,
   parseXStatusURL,
-  validatePostText,
 } from "./validation";
-import type { XPost, XReplyCollection } from "./types";
+import type { ReplySnapshot, XPost, XReplyCollection } from "./types";
 
-const snapshotInput = {
+const snapshotInput: ReplySnapshot = {
   source: {
     url: "https://x.com/company/status/123",
     postId: "123",
@@ -40,7 +38,7 @@ const snapshotInput = {
       directReply: true,
     },
   ],
-} as const;
+};
 
 const sourcePost: XPost = {
   id: "123",
@@ -196,6 +194,16 @@ describe("reply snapshot validation", () => {
         sourcePost.url,
       ),
     ).toThrow("truncated");
+    expect(() =>
+      createReplySnapshot(
+        sourcePost,
+        {
+          ...replyCollection,
+          coverage: { source: "recent-search", days: 7, complete: true },
+        } as unknown as XReplyCollection,
+        sourcePost.url,
+      ),
+    ).toThrow("incomplete recent-search coverage");
   });
 });
 
@@ -291,6 +299,37 @@ describe("reply triage validation", () => {
         snapshot,
       ),
     ).toThrow("high-reach-author");
+    expect(() =>
+      parseReplyTriage(
+        {
+          ...triageInput,
+          classifications: [
+            {
+              ...triageInput.classifications[0],
+              reason: "praise",
+            },
+            triageInput.classifications[1],
+          ],
+        },
+        snapshot,
+      ),
+    ).toThrow("cannot justify respond-now");
+  });
+
+  test("allows amplification only for replies classified as praise", () => {
+    const snapshot = testSnapshot();
+
+    expect(() =>
+      parseReplyTriage(
+        {
+          ...triageInput,
+          amplificationOpportunities: [
+            { replyId: "201", reason: "Highlight this complaint" },
+          ],
+        },
+        snapshot,
+      ),
+    ).toThrow("classified as praise");
   });
 
   test("returns fixed incomplete-coverage output for an empty snapshot", () => {
@@ -310,60 +349,5 @@ describe("reply triage validation", () => {
     );
 
     expect(result.overview).toContain("does not establish historical absence");
-  });
-});
-
-describe("empty recent-search coverage", () => {
-  test("rejects reply-derived claims when X returns no replies", () => {
-    expect(() =>
-      parseLaunchFeedback(
-        {
-          summary: "Users love it",
-          themes: [
-            {
-              label: "Love",
-              sentiment: "positive",
-              summary: "People love it",
-              evidencePostIds: [],
-            },
-          ],
-          faq: [],
-          actions: [],
-          drafts: [
-            { strategy: "concise-recap", title: "One", text: "One" },
-            { strategy: "what-we-heard", title: "Two", text: "Two" },
-            { strategy: "next-steps", title: "Three", text: "Three" },
-          ],
-        },
-        {
-          source: {
-            id: "123",
-            url: "https://x.com/user/status/123",
-            text: "Launch",
-            authorId: "u1",
-            directReply: false,
-          },
-          replies: {
-            sourcePostId: "123",
-            replies: [],
-            analyzedReplies: 0,
-            truncated: false,
-            coverage: { source: "recent-search", days: 7, complete: false },
-          },
-        },
-      ),
-    ).toThrow("must be empty");
-  });
-});
-
-describe("Slack-safe X text", () => {
-  test("rejects URL-heavy text that is X-valid but too large for Slack", () => {
-    const text = Array.from(
-      { length: 10 },
-      (_, index) => `https://example.com/${String(index)}/${"x".repeat(300)}`,
-    ).join(" ");
-    const result = validatePostText(text);
-
-    expect(result.error).toContain("too large to review safely in Slack");
   });
 });

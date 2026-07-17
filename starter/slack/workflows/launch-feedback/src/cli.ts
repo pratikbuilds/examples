@@ -1,6 +1,6 @@
 import { startSlackBridge } from "@corbits/example-slack-bridge";
 
-import { createLaunchFeedbackAdapter } from "./adapter";
+import { createReplyTriageAdapter } from "./adapter";
 import { resolveConfig, SERVICE_NAME } from "./config";
 
 export type MainOptions = {
@@ -19,7 +19,7 @@ export async function main(
   const stderr =
     options.stderr ?? ((text: string) => void process.stderr.write(text));
   if (argv.includes("--help") || argv.includes("-h")) {
-    stdout("usage: bun run start\n\nStart the Slack launch feedback workflow.\n");
+    stdout("usage: bun run start\n\nStart the Slack X reply triage workflow.\n");
     return 0;
   }
 
@@ -28,13 +28,11 @@ export async function main(
     stderr(resolved.error);
     return 1;
   }
-  const adapter = createLaunchFeedbackAdapter({
+  const adapter = createReplyTriageAdapter({
     config: resolved.config,
     stderr,
   });
-  stderr(
-    `X reader=live, publisher=${resolved.config.xClient.writeMode}\n`,
-  );
+  stderr("X reader=live, mutations=disabled\n");
 
   try {
     await startSlackBridge({
@@ -47,7 +45,6 @@ export async function main(
       stderr,
       onEvent: adapter.onEvent,
       onBlockAction: adapter.onBlockAction,
-      onViewSubmission: adapter.onViewSubmission,
       onAssistantUserMessage: adapter.onAssistantUserMessage,
     });
   } catch (error) {

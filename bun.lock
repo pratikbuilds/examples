@@ -381,7 +381,7 @@
       },
     },
     "starter/slack/workflows/launch-feedback": {
-      "name": "@corbits/example-slack-launch-feedback",
+      "name": "@corbits/example-slack-reply-triage",
       "version": "0.1.0",
       "dependencies": {
         "@corbits/example-slack-agent": "workspace:*",
@@ -390,11 +390,9 @@
         "@intx/storage-isogit": "workspace:*",
         "@intx/workflow": "workspace:*",
         "@slack/types": "^2.21.1",
-        "twitter-text": "3.1.0",
       },
       "devDependencies": {
         "@types/bun": "1.3.9",
-        "@types/twitter-text": "3.1.10",
       },
     },
     "starter/workflow-approval-flow": {
@@ -458,7 +456,7 @@
 
     "@corbits/example-slack-bridge": ["@corbits/example-slack-bridge@workspace:starter/slack/bridge"],
 
-    "@corbits/example-slack-launch-feedback": ["@corbits/example-slack-launch-feedback@workspace:starter/slack/workflows/launch-feedback"],
+    "@corbits/example-slack-reply-triage": ["@corbits/example-slack-reply-triage@workspace:starter/slack/workflows/launch-feedback"],
 
     "@corbits/example-workflow-approval-flow": ["@corbits/example-workflow-approval-flow@workspace:starter/workflow-approval-flow"],
 

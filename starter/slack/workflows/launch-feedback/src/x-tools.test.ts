@@ -2,28 +2,31 @@ import { describe, expect, test } from "bun:test";
 
 import type { BaseEnv } from "@intx/agent";
 
-import type {
-  ApprovedDraft,
-  LaunchFeedback,
-  PostReceipt,
-  XPost,
-  XReplyCollection,
-} from "./types";
+import type { ReplySnapshot, ReplyTriage, XPost, XReplyCollection } from "./types";
 import {
-  createAnalysisState,
-  createAnalyzeXTools,
-  createApprovedDraftCapability,
-  createCreatePostTool,
+  DEFAULT_REPLY_SAMPLE_SIZE,
+  type XReadClient,
+} from "./x-client";
+import {
+  createCollectState,
+  createCollectXTools,
+  createTriageTools,
 } from "./x-tools";
-import type { XClient } from "./x-client";
 
 const source: XPost = {
   id: "123",
   url: "https://x.com/builder/status/123",
   text: "We shipped",
   authorId: "u1",
-  author: { id: "u1", name: "Builder", username: "builder" },
+  author: {
+    id: "u1",
+    name: "Builder",
+    username: "builder",
+    publicMetrics: { followers: 100, following: 1, posts: 10, listed: 2 },
+  },
+  conversationId: "123",
   directReply: false,
+  publicMetrics: { replies: 1, likes: 5, reposts: 2, quotes: 1 },
 };
 
 const replies: XReplyCollection = {
@@ -34,9 +37,16 @@ const replies: XReplyCollection = {
       url: "https://x.com/user/status/124",
       text: "Can this export data?",
       authorId: "u2",
-      author: { id: "u2", name: "User", username: "user" },
+      author: {
+        id: "u2",
+        name: "User",
+        username: "user",
+        publicMetrics: { followers: 25, following: 2, posts: 5, listed: 0 },
+      },
+      conversationId: "123",
       parentPostId: "123",
       directReply: true,
+      publicMetrics: { replies: 0, likes: 1, reposts: 0, quotes: 0 },
     },
   ],
   analyzedReplies: 1,
@@ -44,152 +54,73 @@ const replies: XReplyCollection = {
   coverage: { source: "recent-search", days: 7, complete: false },
 };
 
-function analysisArguments(evidencePostId = "124") {
-  return {
-    summary: "People want export support.",
-    themes: [
-      {
-        label: "Exports",
-        sentiment: "neutral",
-        summary: "Users asked about exports.",
-        evidencePostIds: [evidencePostId],
-      },
-    ],
-    faq: [
-      {
-        question: "Can it export data?",
-        suggestedAnswer: "Exports are on the roadmap.",
-        evidencePostIds: [evidencePostId],
-      },
-    ],
-    actions: [
-      {
-        priority: "high",
-        owner: "product",
-        action: "Clarify export support.",
-        evidencePostIds: [evidencePostId],
-      },
-    ],
-    drafts: [
-      { strategy: "concise-recap", title: "Recap", text: "Thanks for the feedback." },
-      { strategy: "what-we-heard", title: "What we heard", text: "We heard your export questions." },
-      { strategy: "next-steps", title: "Next", text: "Next, we are clarifying exports." },
-    ],
-  };
+const client: XReadClient = {
+  getPost: async () => source,
+  getPostReplies: async () => replies,
+};
+
+async function collectSnapshot(): Promise<ReplySnapshot> {
+  let captured: ReplySnapshot | undefined;
+  const factory = createCollectXTools();
+  const bundle = factory({
+    xClient: client,
+    collectState: createCollectState(source.url),
+    snapshotSink: (value: ReplySnapshot) => {
+      captured = value;
+    },
+  } as unknown as BaseEnv & Parameters<typeof factory>[0]);
+  const signal = new AbortController().signal;
+  await bundle.run(
+    { id: "post", name: "x_get_post", arguments: { url: source.url } },
+    signal,
+  );
+  await bundle.run(
+    {
+      id: "replies",
+      name: "x_get_post_replies",
+      arguments: { url: source.url },
+    },
+    signal,
+  );
+  const result = await bundle.run(
+    { id: "snapshot", name: "replies_return_snapshot", arguments: {} },
+    signal,
+  );
+  expect(result.isError).not.toBe(true);
+  return captured!;
 }
 
-function createClient(overrides: Partial<XClient> = {}): XClient {
-  return {
-    writeMode: "dry-run",
-    getMe: async () => ({ id: "u1", name: "Builder", username: "builder" }),
-    getPost: async () => source,
-    getPostReplies: async () => replies,
-    createPost: async (text) => ({
-      mode: "dry-run",
-      postId: "dryrun-1",
-      url: "https://x.com/i/web/status/dryrun-1",
-      text,
-      postedAt: "2026-07-16T00:00:00.000Z",
-    }),
-    ...overrides,
-  };
-}
-
-describe("analysis X tools", () => {
-  test("exposes reads and structured feedback but no createPost", async () => {
-    const captured: LaunchFeedback[] = [];
-    const state = createAnalysisState();
-    const factory = createAnalyzeXTools();
+describe("collection tools", () => {
+  test("exposes only X reads and deterministic snapshot construction", async () => {
+    const factory = createCollectXTools();
     const bundle = factory({
-      xClient: createClient(),
-      analysisState: state,
-      feedbackSink: (value: LaunchFeedback) => void captured.push(value),
+      xClient: client,
+      collectState: createCollectState(source.url),
+      snapshotSink: () => undefined,
     } as unknown as BaseEnv & Parameters<typeof factory>[0]);
 
     expect(bundle.definitions.map((definition) => definition.name)).toEqual([
       "x_get_post",
       "x_get_post_replies",
-      "launch_present_feedback",
+      "replies_return_snapshot",
     ]);
-
-    await bundle.run(
-      { id: "post", name: "x_get_post", arguments: { url: source.url } },
-      new AbortController().signal,
-    );
-    await bundle.run(
-      {
-        id: "replies",
-        name: "x_get_post_replies",
-        arguments: { url: source.url },
-      },
-      new AbortController().signal,
-    );
-    const result = await bundle.run(
-      {
-        id: "feedback",
-        name: "launch_present_feedback",
-        arguments: analysisArguments(),
-      },
-      new AbortController().signal,
-    );
-
-    expect(result.isError).not.toBe(true);
-    expect(captured[0]?.source).toMatchObject({
-      postId: "123",
-      authorUsername: "builder",
+    expect(await collectSnapshot()).toMatchObject({
+      source: { postId: "123", authorUsername: "builder" },
+      coverage: { analyzedReplies: 1, searchWindow: "recent-7-days" },
+      replies: [{ id: "124", author: { username: "user" } }],
     });
-    expect(captured[0]?.themes[0]?.evidenceUrls).toEqual([
-      "https://x.com/user/status/124",
-    ]);
   });
 
-  test("rejects evidence that was not returned by getPostReplies", async () => {
-    const state = createAnalysisState();
-    const factory = createAnalyzeXTools();
+  test("rejects model-selected URLs that differ from the trigger", async () => {
+    const factory = createCollectXTools();
     const bundle = factory({
-      xClient: createClient(),
-      analysisState: state,
-      feedbackSink: () => undefined,
+      xClient: client,
+      collectState: createCollectState(source.url),
+      snapshotSink: () => undefined,
     } as unknown as BaseEnv & Parameters<typeof factory>[0]);
-    const signal = new AbortController().signal;
-    await bundle.run(
-      { id: "post", name: "x_get_post", arguments: { url: source.url } },
-      signal,
-    );
-    await bundle.run(
-      {
-        id: "replies",
-        name: "x_get_post_replies",
-        arguments: { url: source.url },
-      },
-      signal,
-    );
-
     const result = await bundle.run(
       {
-        id: "feedback",
-        name: "launch_present_feedback",
-        arguments: analysisArguments("999"),
-      },
-      signal,
-    );
-
-    expect(result.isError).toBe(true);
-    expect(result.content).toContain("999");
-  });
-
-  test("rejects a model-selected URL that differs from the trigger", async () => {
-    const state = createAnalysisState(source.url);
-    const factory = createAnalyzeXTools();
-    const bundle = factory({
-      xClient: createClient(),
-      analysisState: state,
-      feedbackSink: () => undefined,
-    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
-
-    const result = await bundle.run(
-      {
-        id: "wrong-post",
+        id: "wrong",
         name: "x_get_post",
         arguments: { url: "https://x.com/other/status/999" },
       },
@@ -197,100 +128,163 @@ describe("analysis X tools", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.content).toContain("same X status URL");
+    expect(result.content).toContain("trigger URL");
   });
-});
 
-describe("createPost approval capability", () => {
-  const approved: ApprovedDraft = {
-    draftId: "draft-1",
-    revision: 2,
-    text: "Approved text",
-    approvedBy: "U1",
-    approvedAt: "2026-07-16T00:00:00.000Z",
-  };
-
-  test("does not consume approval on mismatch and consumes exact text once", async () => {
-    const published: string[] = [];
-    const client = createClient({
-      createPost: async (text) => {
-        published.push(text);
-        return {
-          mode: "dry-run",
-          postId: "p1",
-          url: "https://x.com/i/web/status/p1",
-          text,
-          postedAt: "2026-07-16T00:00:00.000Z",
-        };
-      },
-    });
-    const factory = createCreatePostTool();
+  test("uses a bounded reply sample when the model omits maxResults", async () => {
+    let observedMaxResults: number | undefined;
+    const factory = createCollectXTools();
     const bundle = factory({
-      xClient: client,
-      approvedDraft: createApprovedDraftCapability(approved),
-      receiptSink: () => undefined,
+      xClient: {
+        getPost: async () => source,
+        getPostReplies: async (input: {
+          url: string;
+          maxResults?: number;
+          signal?: AbortSignal;
+        }) => {
+          observedMaxResults = input.maxResults;
+          return replies;
+        },
+      },
+      collectState: createCollectState(source.url),
+      snapshotSink: () => undefined,
     } as unknown as BaseEnv & Parameters<typeof factory>[0]);
     const signal = new AbortController().signal;
 
-    const mismatch = await bundle.run(
-      {
-        id: "bad",
-        name: "x_create_post",
-        arguments: { text: "Changed" },
-      },
+    await bundle.run(
+      { id: "post", name: "x_get_post", arguments: { url: source.url } },
       signal,
     );
-    const success = await bundle.run(
+    await bundle.run(
       {
-        id: "good",
-        name: "x_create_post",
-        arguments: { text: "Approved text" },
-      },
-      signal,
-    );
-    const replay = await bundle.run(
-      {
-        id: "replay",
-        name: "x_create_post",
-        arguments: { text: "Approved text" },
+        id: "replies",
+        name: "x_get_post_replies",
+        arguments: { url: source.url },
       },
       signal,
     );
 
-    expect(mismatch.isError).toBe(true);
-    expect(success.isError).not.toBe(true);
-    expect(replay.isError).toBe(true);
-    expect(published).toEqual(["Approved text"]);
+    expect(observedMaxResults).toBe(DEFAULT_REPLY_SAMPLE_SIZE);
   });
 
-  test("keeps a successful receipt when the receipt sink throws", async () => {
-    const receipt: PostReceipt = {
-      mode: "live",
-      postId: "p1",
-      url: "https://x.com/i/web/status/p1",
-      text: "Approved text",
-      postedAt: "2026-07-16T00:00:00.000Z",
-    };
-    const factory = createCreatePostTool();
+  test("enforces the reply sample cap when the model requests more", async () => {
+    let observedMaxResults: number | undefined;
+    const factory = createCollectXTools();
     const bundle = factory({
-      xClient: createClient({ createPost: async () => receipt }),
-      approvedDraft: createApprovedDraftCapability(approved),
-      receiptSink: () => {
-        throw new Error("Slack unavailable");
+      xClient: {
+        getPost: async () => source,
+        getPostReplies: async (input: {
+          url: string;
+          maxResults?: number;
+          signal?: AbortSignal;
+        }) => {
+          observedMaxResults = input.maxResults;
+          return replies;
+        },
       },
+      collectState: createCollectState(source.url),
+      snapshotSink: () => undefined,
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
+    const signal = new AbortController().signal;
+
+    await bundle.run(
+      { id: "post", name: "x_get_post", arguments: { url: source.url } },
+      signal,
+    );
+    await bundle.run(
+      {
+        id: "replies",
+        name: "x_get_post_replies",
+        arguments: { url: source.url, maxResults: 100 },
+      },
+      signal,
+    );
+
+    expect(observedMaxResults).toBe(DEFAULT_REPLY_SAMPLE_SIZE);
+  });
+});
+
+describe("triage tool", () => {
+  test("has no X tools and returns evidence-bound triage", async () => {
+    const snapshot = await collectSnapshot();
+    const captured: ReplyTriage[] = [];
+    const factory = createTriageTools();
+    const bundle = factory({
+      snapshot,
+      triageSink: (value: ReplyTriage) => void captured.push(value),
     } as unknown as BaseEnv & Parameters<typeof factory>[0]);
 
+    expect(bundle.definitions.map((definition) => definition.name)).toEqual([
+      "replies_present_triage",
+    ]);
     const result = await bundle.run(
       {
-        id: "call",
-        name: "x_create_post",
-        arguments: { text: "Approved text" },
+        id: "triage",
+        name: "replies_present_triage",
+        arguments: {
+          overview: "One product question needs a response.",
+          classifications: [
+            {
+              replyId: "124",
+              priority: "respond-now",
+              reason: "question",
+              summary: "Asked about export support",
+              recommendedOwner: "product",
+              suggestedResponseAngle: "Clarify current export support.",
+            },
+          ],
+          themes: [
+            {
+              label: "Exports",
+              count: 1,
+              sentiment: "neutral",
+              summary: "A user asked about exports.",
+              evidenceReplyIds: ["124"],
+            },
+          ],
+          amplificationOpportunities: [],
+        },
       },
       new AbortController().signal,
     );
 
     expect(result.isError).not.toBe(true);
-    expect(result.detail).toEqual(receipt);
-    expect(result.content).toContain("receipt sink failed");
+    expect(captured[0]).toMatchObject({
+      counts: { respondNow: 1, respondLater: 0, noResponse: 0 },
+      classifications: [{ replyURL: "https://x.com/user/status/124" }],
+    });
+  });
+
+  test("rejects reply evidence outside the trusted snapshot", async () => {
+    const snapshot = await collectSnapshot();
+    const factory = createTriageTools();
+    const bundle = factory({
+      snapshot,
+      triageSink: () => undefined,
+    } as unknown as BaseEnv & Parameters<typeof factory>[0]);
+    const result = await bundle.run(
+      {
+        id: "bad",
+        name: "replies_present_triage",
+        arguments: {
+          overview: "Unknown",
+          classifications: [
+            {
+              replyId: "999",
+              priority: "respond-now",
+              reason: "question",
+              summary: "Unknown",
+              recommendedOwner: "marketing",
+            },
+          ],
+          themes: [],
+          amplificationOpportunities: [],
+        },
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("exactly once");
   });
 });

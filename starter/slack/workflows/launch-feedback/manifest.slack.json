@@ -1,7 +1,7 @@
 {
   "display_information": {
-    "name": "interchange-launch-feedback",
-    "description": "Analyze X launch replies, review follow-up drafts, and publish with Slack approval",
+    "name": "interchange-reply-triage",
+    "description": "Triage recent X replies into clear response priorities for marketing teams",
     "background_color": "#111111"
   },
   "features": {
@@ -11,15 +11,15 @@
       "messages_tab_read_only_enabled": false
     },
     "bot_user": {
-      "display_name": "interchange-launch-feedback",
+      "display_name": "interchange-reply-triage",
       "always_online": true
     },
     "assistant_view": {
-      "assistant_description": "Analyze recent replies to an X launch post and review follow-up drafts in Slack.",
+      "assistant_description": "Find which recent X replies need a response and summarize recurring themes.",
       "suggested_prompts": [
         {
-          "title": "Analyze launch feedback",
-          "message": "Analyze the replies to https://x.com/user/status/123"
+          "title": "Triage X replies",
+          "message": "Triage the replies to https://x.com/user/status/123"
         }
       ]
     }
@@ -52,9 +52,6 @@
         "assistant_thread_started",
         "assistant_thread_context_changed"
       ]
-    },
-    "interactivity": {
-      "is_enabled": true
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
