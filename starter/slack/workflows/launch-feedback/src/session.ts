@@ -1,6 +1,7 @@
 import {
   postMessage,
   slackThreadKey,
+  updateMessage,
   type SlackThreadRef,
   type Write,
 } from "@corbits/example-slack-bridge";
@@ -8,25 +9,55 @@ import { runLocal, type WorkflowRun } from "@intx/workflow";
 
 import {
   alreadyRunningBlocks,
+  createReadyBlocks,
+  draftApprovalBlocks,
+  draftDecisionBlocks,
   failedBlocks,
   invalidURLBlocks,
+  postedResultBlocks,
   startedBlocks,
   triageResultBlocks,
 } from "./blocks";
 import type { ReplyTriageConfig } from "./config";
 import { createInvokeStep, createWorkflowAuthorize } from "./invoke-step";
-import type { ReplyTriageResult, ReplyTriageTrigger } from "./types";
+import type {
+  ApprovalPayload,
+  CreateDraftsResult,
+  PostRepliesResult,
+  ReplyDraft,
+  ReplyTriageTrigger,
+} from "./types";
 import { parseXStatusURL } from "./validation";
-import { defineReplyTriageWorkflow } from "./workflow";
+import { APPROVAL_SIGNAL, defineReplyTriageWorkflow } from "./workflow";
 
 type SendMessage = typeof postMessage;
+type UpdateMessage = typeof updateMessage;
 
-export type ReplyTriageRun = Pick<WorkflowRun, "complete">;
+export type ReplyTriageRun = Pick<WorkflowRun, "complete" | "signal">;
 
 export type StartWorkflow = (input: {
   triggerPayload: ReplyTriageTrigger;
   log: (line: string) => void;
+  onStepDone?: (stepId: string, output: unknown) => void;
 }) => ReplyTriageRun;
+
+type DraftDecision = "approved" | "rejected";
+
+type PendingDraft = {
+  key: string;
+  draft: ReplyDraft;
+  messageTs: string;
+  decision?: DraftDecision;
+};
+
+type PendingRun = {
+  key: string;
+  thread: SlackThreadRef;
+  run: ReplyTriageRun;
+  drafts: Map<string, PendingDraft>;
+  signaled: boolean;
+  status: "running" | "awaiting-approval" | "finishing" | "finished";
+};
 
 export type ReplyTriageSessions = {
   start: (input: {
@@ -36,6 +67,8 @@ export type ReplyTriageSessions = {
     prompt: string;
     userId?: string;
   }) => Promise<void>;
+  approve: (key: string, userId?: string) => Promise<void>;
+  reject: (key: string, userId?: string) => Promise<void>;
 };
 
 export function createReplyTriageSessions(options: {
@@ -43,10 +76,13 @@ export function createReplyTriageSessions(options: {
   stderr: Write;
   startWorkflow?: StartWorkflow;
   sendMessage?: SendMessage;
+  updateMessage?: UpdateMessage;
 }): ReplyTriageSessions {
   const { config, stderr } = options;
   const sendMessage = options.sendMessage ?? postMessage;
-  const activeThreads = new Set<string>();
+  const editMessage = options.updateMessage ?? updateMessage;
+  const pendingByThread = new Map<string, PendingRun>();
+  const draftByKey = new Map<string, { threadKey: string; draftKey: string }>();
 
   const startWorkflow: StartWorkflow =
     options.startWorkflow ??
@@ -57,9 +93,11 @@ export function createReplyTriageSessions(options: {
         invokeStep: createInvokeStep({
           source: config.source,
           xClient: config.xClient,
+          xPublisher: config.xPublisher,
           contextRoot: config.contextRoot,
           authorize,
           log: input.log,
+          onStepDone: input.onStepDone,
         }),
         authorize,
       });
@@ -89,7 +127,7 @@ export function createReplyTriageSessions(options: {
       threadTs: input.threadTs,
     };
     const key = slackThreadKey(thread);
-    if (activeThreads.has(key)) {
+    if (pendingByThread.has(key)) {
       await sendMessage(config.botToken, {
         channel: input.channel,
         thread_ts: input.threadTs,
@@ -99,7 +137,7 @@ export function createReplyTriageSessions(options: {
       return;
     }
 
-    activeThreads.add(key);
+    const createReady = deferred<CreateDraftsResult>();
     let watching = false;
     try {
       await sendMessage(config.botToken, {
@@ -120,38 +158,164 @@ export function createReplyTriageSessions(options: {
           },
         },
         log: (line) => stderr(`slack-x-reply-triage: ${line}\n`),
+        onStepDone(stepId, output) {
+          if (stepId === "create") {
+            createReady.resolve(output as CreateDraftsResult);
+          }
+        },
       });
+      const pending: PendingRun = {
+        key,
+        thread,
+        run,
+        drafts: new Map(),
+        signaled: false,
+        status: "running",
+      };
+      pendingByThread.set(key, pending);
       watching = true;
-      void watchTerminal(key, thread, run);
+      void handleCreateReady(pending, createReady.promise);
+      void watchTerminal(pending);
     } catch (error) {
+      pendingByThread.delete(key);
       await reportFailure(thread, error);
     } finally {
-      if (!watching) activeThreads.delete(key);
+      if (!watching) pendingByThread.delete(key);
     }
   }
 
-  async function watchTerminal(
+  async function approve(key: string): Promise<void> {
+    await decideDraft(key, "approved");
+  }
+
+  async function reject(key: string): Promise<void> {
+    await decideDraft(key, "rejected");
+  }
+
+  async function decideDraft(
     key: string,
-    thread: SlackThreadRef,
-    run: ReplyTriageRun,
+    decision: DraftDecision,
+  ): Promise<void> {
+    const ref = draftByKey.get(key);
+    if (ref === undefined) return;
+    const pending = pendingByThread.get(ref.threadKey);
+    if (pending === undefined || pending.status !== "awaiting-approval") return;
+    const draft = pending.drafts.get(ref.draftKey);
+    if (draft === undefined || draft.decision !== undefined) return;
+
+    draft.decision = decision;
+    await editMessage(config.botToken, {
+      channel: pending.thread.channel,
+      ts: draft.messageTs,
+      text:
+        decision === "approved"
+          ? `Approved reply to @${draft.draft.authorUsername}`
+          : `Rejected reply to @${draft.draft.authorUsername}`,
+      blocks: draftDecisionBlocks(draft.draft, decision),
+    }).catch(() => undefined);
+
+    await maybeSignalApproval(pending);
+  }
+
+  async function handleCreateReady(
+    pending: PendingRun,
+    createReady: Promise<CreateDraftsResult>,
   ): Promise<void> {
     try {
-      const completed = await run.complete;
+      const created = await Promise.race([
+        createReady,
+        pending.run.complete.then(() => undefined),
+      ]);
+      if (created === undefined || pending.status !== "running") return;
+
+      await sendMessage(config.botToken, {
+        channel: pending.thread.channel,
+        thread_ts: pending.thread.threadTs,
+        text: `Reply triage complete: ${String(created.triage.counts.respondNow)} respond now`,
+        blocks: triageResultBlocks(created),
+      });
+      await sendMessage(config.botToken, {
+        channel: pending.thread.channel,
+        thread_ts: pending.thread.threadTs,
+        text: "Draft approval",
+        blocks: createReadyBlocks(created),
+      });
+
+      if (created.drafts.length === 0) {
+        pending.status = "awaiting-approval";
+        await signalApproval(pending, { approved: [] });
+        return;
+      }
+
+      pending.status = "awaiting-approval";
+      for (const draft of created.drafts) {
+        const draftKey = `${pending.key}:${draft.replyId}`;
+        const posted = await sendMessage(config.botToken, {
+          channel: pending.thread.channel,
+          thread_ts: pending.thread.threadTs,
+          text: `Draft reply to @${draft.authorUsername}`,
+          blocks: draftApprovalBlocks(draft, draftKey),
+        });
+        pending.drafts.set(draft.replyId, {
+          key: draftKey,
+          draft,
+          messageTs: posted.ts,
+        });
+        draftByKey.set(draftKey, {
+          threadKey: pending.key,
+          draftKey: draft.replyId,
+        });
+      }
+    } catch (error) {
+      if (pending.status !== "finished") {
+        await reportFailure(pending.thread, error);
+        finish(pending);
+      }
+    }
+  }
+
+  async function maybeSignalApproval(pending: PendingRun): Promise<void> {
+    if (pending.signaled || pending.status !== "awaiting-approval") return;
+    for (const draft of pending.drafts.values()) {
+      if (draft.decision === undefined) return;
+    }
+    const approved = [...pending.drafts.values()]
+      .filter((item) => item.decision === "approved")
+      .map((item) => item.draft);
+    await signalApproval(pending, { approved });
+  }
+
+  async function signalApproval(
+    pending: PendingRun,
+    payload: ApprovalPayload,
+  ): Promise<void> {
+    if (pending.signaled) return;
+    pending.signaled = true;
+    pending.status = "finishing";
+    await pending.run.signal(APPROVAL_SIGNAL, payload);
+  }
+
+  async function watchTerminal(pending: PendingRun): Promise<void> {
+    try {
+      const completed = await pending.run.complete;
       if (completed.terminalStatus !== "completed") {
         throw new Error("Workflow run failed");
       }
-      const result = completed.outputs.triage as ReplyTriageResult | undefined;
-      if (result === undefined) throw new Error("Triage step returned no output");
+      const result = completed.outputs.post as PostRepliesResult | undefined;
+      if (result === undefined) throw new Error("Post step returned no output");
       await sendMessage(config.botToken, {
-        channel: thread.channel,
-        thread_ts: thread.threadTs,
-        text: `Reply triage complete: ${String(result.triage.counts.respondNow)} respond now, ${String(result.triage.counts.respondLater)} respond later`,
-        blocks: triageResultBlocks(result),
+        channel: pending.thread.channel,
+        thread_ts: pending.thread.threadTs,
+        text:
+          result.posted.length === 0
+            ? "No replies posted"
+            : `Posted ${String(result.posted.length)} ${result.posted.length === 1 ? "reply" : "replies"} to X`,
+        blocks: postedResultBlocks(result),
       });
     } catch (error) {
-      await reportFailure(thread, error);
+      await reportFailure(pending.thread, error);
     } finally {
-      activeThreads.delete(key);
+      finish(pending);
     }
   }
 
@@ -169,7 +333,15 @@ export function createReplyTriageSessions(options: {
     }).catch(() => undefined);
   }
 
-  return { start };
+  function finish(pending: PendingRun): void {
+    pending.status = "finished";
+    pendingByThread.delete(pending.key);
+    for (const draft of pending.drafts.values()) {
+      draftByKey.delete(draft.key);
+    }
+  }
+
+  return { start, approve, reject };
 }
 
 export function extractXStatusURL(prompt: string): string | undefined {
@@ -187,4 +359,12 @@ export function extractXStatusURL(prompt: string): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }

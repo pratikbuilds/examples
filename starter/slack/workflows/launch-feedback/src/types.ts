@@ -75,6 +75,7 @@ export type ReplySnapshot = {
     };
   };
   coverage: {
+    fetchedReplies: number;
     analyzedReplies: number;
     truncated: boolean;
     nextToken?: string;
@@ -100,15 +101,7 @@ export type ReplySnapshot = {
 
 export type ReplyPriority = "respond-now" | "respond-later" | "no-response";
 
-export type ReplyReason =
-  | "question"
-  | "complaint"
-  | "purchase-intent"
-  | "feature-request"
-  | "misinformation"
-  | "high-reach-author"
-  | "praise"
-  | "spam";
+export type ReplyReason = "question" | "complaint" | "feature-request";
 
 export type ReplyTriage = {
   overview: string;
@@ -142,4 +135,34 @@ export type ReplyTriage = {
 export type ReplyTriageResult = {
   snapshot: ReplySnapshot;
   triage: ReplyTriage;
+};
+
+export type ReplyDraft = {
+  replyId: string;
+  replyURL: string;
+  authorUsername: string;
+  reason: ReplyReason;
+  text: string;
+};
+
+export type CreateDraftsResult = {
+  snapshot: ReplySnapshot;
+  triage: ReplyTriage;
+  drafts: ReplyDraft[];
+};
+
+export type ApprovalPayload = {
+  approved: ReplyDraft[];
+};
+
+export type PostedReply = {
+  replyId: string;
+  replyURL: string;
+  postedURL: string;
+  text: string;
+  mode: "live" | "dry-run";
+};
+
+export type PostRepliesResult = {
+  posted: PostedReply[];
 };

@@ -16,6 +16,7 @@ const snapshotInput: ReplySnapshot = {
     metrics: { replies: 2, likes: 10, reposts: 3, quotes: 1 },
   },
   coverage: {
+    fetchedReplies: 2,
     analyzedReplies: 2,
     truncated: false,
     searchWindow: "recent-7-days",
@@ -32,7 +33,7 @@ const snapshotInput: ReplySnapshot = {
     {
       id: "202",
       url: "https://x.com/bob/status/202",
-      text: "Great launch",
+      text: "Please add SSO",
       author: { username: "bob", followers: 20, verified: false },
       metrics: { likes: 1, replies: 0, reposts: 0 },
       directReply: true,
@@ -101,10 +102,10 @@ const triageInput = {
     },
     {
       replyId: "202",
-      priority: "no-response",
-      reason: "praise",
-      summary: "General praise",
-      recommendedOwner: "marketing",
+      priority: "respond-later",
+      reason: "feature-request",
+      summary: "SSO request",
+      recommendedOwner: "product",
     },
   ],
   themes: [
@@ -117,7 +118,7 @@ const triageInput = {
     },
   ],
   amplificationOpportunities: [
-    { replyId: "202", reason: "Positive customer reaction" },
+    { replyId: "201", reason: "Clear product question from a real user" },
   ],
 } as const;
 
@@ -161,6 +162,15 @@ describe("reply snapshot validation", () => {
         "https://x.com/other/status/999",
       ),
     ).toThrow("trigger URL");
+  });
+
+  test("filters to selected candidate reply ids", () => {
+    expect(
+      createReplySnapshot(sourcePost, replyCollection, sourcePost.url, ["201"]),
+    ).toMatchObject({
+      coverage: { fetchedReplies: 2, analyzedReplies: 1 },
+      replies: [{ id: "201" }],
+    });
   });
 
   test("treats X usernames as case-insensitive when binding the trigger", () => {
@@ -211,7 +221,7 @@ describe("reply triage validation", () => {
   test("normalizes evidence and derives trustworthy counts", () => {
     const snapshot = testSnapshot();
     expect(parseReplyTriage(triageInput, snapshot)).toMatchObject({
-      counts: { respondNow: 1, respondLater: 0, noResponse: 1 },
+      counts: { respondNow: 1, respondLater: 1, noResponse: 0 },
       classifications: [
         { replyURL: "https://x.com/alice/status/201", authorUsername: "alice" },
         { replyURL: "https://x.com/bob/status/202", authorUsername: "bob" },
@@ -242,7 +252,7 @@ describe("reply triage validation", () => {
     ).toThrow("exactly once");
   });
 
-  test("rejects unknown evidence, inflated themes, and unsupported urgency", () => {
+  test("rejects unknown evidence, inflated themes, and unsupported reasons", () => {
     const snapshot = testSnapshot();
     expect(() =>
       parseReplyTriage(
@@ -268,41 +278,6 @@ describe("reply triage validation", () => {
       parseReplyTriage(
         {
           ...triageInput,
-          themes: [
-            {
-              ...triageInput.themes[0],
-              count: 1,
-              evidenceReplyIds: ["201", "202"],
-            },
-          ],
-        },
-        snapshot,
-      ),
-    ).toThrow("less than its evidence count");
-    expect(parseReplyTriage(triageInput, snapshot).counts).toEqual({
-      respondNow: 1,
-      respondLater: 0,
-      noResponse: 1,
-    });
-    expect(() =>
-      parseReplyTriage(
-        {
-          ...triageInput,
-          classifications: [
-            {
-              ...triageInput.classifications[0],
-              reason: "high-reach-author",
-            },
-            triageInput.classifications[1],
-          ],
-        },
-        snapshot,
-      ),
-    ).toThrow("high-reach-author");
-    expect(() =>
-      parseReplyTriage(
-        {
-          ...triageInput,
           classifications: [
             {
               ...triageInput.classifications[0],
@@ -313,23 +288,27 @@ describe("reply triage validation", () => {
         },
         snapshot,
       ),
-    ).toThrow("cannot justify respond-now");
+    ).toThrow("question, complaint, feature-request");
   });
 
-  test("allows amplification only for replies classified as praise", () => {
+  test("allows amplification for any candidate reply", () => {
     const snapshot = testSnapshot();
-
-    expect(() =>
+    expect(
       parseReplyTriage(
         {
           ...triageInput,
           amplificationOpportunities: [
-            { replyId: "201", reason: "Highlight this complaint" },
+            { replyId: "202", reason: "Useful feature signal" },
           ],
         },
         snapshot,
-      ),
-    ).toThrow("classified as praise");
+      ).amplificationOpportunities,
+    ).toEqual([
+      {
+        replyURL: "https://x.com/bob/status/202",
+        reason: "Useful feature signal",
+      },
+    ]);
   });
 
   test("returns fixed incomplete-coverage output for an empty snapshot", () => {

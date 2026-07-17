@@ -4,6 +4,7 @@ import {
   type Write,
 } from "@corbits/example-slack-bridge";
 
+import { APPROVE_ACTION_ID, REJECT_ACTION_ID } from "./blocks";
 import type { ReplyTriageConfig } from "./config";
 import { createReplyTriageSessions } from "./session";
 
@@ -16,6 +17,9 @@ export function createReplyTriageAdapter(options: {
   const sessions = createReplyTriageSessions(options);
   return createSlackWorkflowAdapter({
     onStart: sessions.start,
-    actionHandlers: {},
+    actionHandlers: {
+      [APPROVE_ACTION_ID]: (action) => sessions.approve(action.value, action.userId),
+      [REJECT_ACTION_ID]: (action) => sessions.reject(action.value, action.userId),
+    },
   });
 }

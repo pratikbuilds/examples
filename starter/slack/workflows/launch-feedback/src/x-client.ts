@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import type {
   XCredentials,
@@ -23,6 +23,23 @@ export type XReadClient = {
     maxResults?: number;
     signal?: AbortSignal;
   }) => Promise<XReplyCollection>;
+};
+
+export type ReplyReceipt = {
+  mode: "live" | "dry-run";
+  postId: string;
+  url: string;
+  text: string;
+  inReplyToPostId: string;
+  postedAt: string;
+};
+
+export type XReplyPublisher = {
+  mode: "live" | "dry-run";
+  reply: (
+    input: { text: string; inReplyToPostId: string },
+    signal?: AbortSignal,
+  ) => Promise<ReplyReceipt>;
 };
 
 export class XAPIError extends Error {
@@ -152,6 +169,69 @@ export function resolveCredentials(
     return undefined;
   }
   return { apiKey, apiSecret, accessToken, accessTokenSecret };
+}
+
+export function createXReplyPublisher(
+  credentials: XCredentials,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: Fetch = fetch,
+): XReplyPublisher {
+  if (env.X_DRY_RUN === "1") {
+    return {
+      mode: "dry-run",
+      async reply(input) {
+        const postId = `dryrun-${randomUUID()}`;
+        return {
+          mode: "dry-run",
+          postId,
+          url: `https://x.com/i/web/status/${postId}`,
+          text: input.text,
+          inReplyToPostId: input.inReplyToPostId,
+          postedAt: new Date().toISOString(),
+        };
+      },
+    };
+  }
+
+  return {
+    mode: "live",
+    async reply(input, signal) {
+      const endpoint = new URL("/2/tweets", API_ORIGIN);
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: buildOAuthHeader("POST", endpoint.toString(), credentials),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text: input.text,
+          reply: { in_reply_to_tweet_id: input.inReplyToPostId },
+        }),
+        signal,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new XAPIError(
+          response.status,
+          `X reply failed: ${body.slice(0, 500)}`,
+          parseRateLimit(response.headers),
+        );
+      }
+      const payload = (await response.json()) as { data?: { id?: string } };
+      const postId = payload.data?.id;
+      if (postId === undefined) {
+        throw new Error("X API response did not include a post id");
+      }
+      return {
+        mode: "live",
+        postId,
+        url: `https://x.com/i/web/status/${postId}`,
+        text: input.text,
+        inReplyToPostId: input.inReplyToPostId,
+        postedAt: new Date().toISOString(),
+      };
+    },
+  };
 }
 
 export function buildOAuthHeader(

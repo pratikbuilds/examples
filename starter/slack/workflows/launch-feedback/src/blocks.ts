@@ -1,6 +1,20 @@
-import { header, section, type SlackBlock } from "@corbits/example-slack-bridge";
+import {
+  actions,
+  button,
+  header,
+  section,
+  type SlackBlock,
+} from "@corbits/example-slack-bridge";
 
-import type { ReplyTriageResult } from "./types";
+import type {
+  CreateDraftsResult,
+  PostRepliesResult,
+  ReplyDraft,
+  ReplyTriageResult,
+} from "./types";
+
+export const APPROVE_ACTION_ID = "reply.approve";
+export const REJECT_ACTION_ID = "reply.reject";
 
 export function startedBlocks(url: string): SlackBlock[] {
   return [
@@ -33,20 +47,22 @@ export function triageResultBlocks(result: ReplyTriageResult): SlackBlock[] {
     section(
       [
         `*Source:* <${snapshot.source.url}|@${slackText(snapshot.source.authorUsername)} on X>`,
-        `*Coverage:* ${String(snapshot.coverage.analyzedReplies)} recent ${plural(snapshot.coverage.analyzedReplies, "reply", "replies")} analyzed · X reports ${String(snapshot.source.metrics.replies)} total ${plural(snapshot.source.metrics.replies, "reply", "replies")}`,
-        "*Search window:* X recent search (up to 7 days; historical coverage is not guaranteed)",
-        snapshot.coverage.truncated
-          ? "*Pagination:* more recent results are available"
-          : "*Pagination:* no additional page was returned",
+        `*Coverage:* ${String(snapshot.coverage.analyzedReplies)} candidate ${plural(snapshot.coverage.analyzedReplies, "reply", "replies")} from ${String(snapshot.coverage.fetchedReplies)} fetched · X reports ${String(snapshot.source.metrics.replies)} total ${plural(snapshot.source.metrics.replies, "reply", "replies")}`,
       ].join("\n"),
     ),
     section(`*Overview*\n${boundedText(triage.overview, 2800)}`),
   ];
 
-  if (snapshot.coverage.analyzedReplies === 0) {
+  if (snapshot.coverage.fetchedReplies === 0) {
     blocks.push(
       section(
         "*:warning: Incomplete coverage*\nNo replies were returned by X recent search. This does not mean the post has never received replies.",
+      ),
+    );
+  } else if (snapshot.coverage.analyzedReplies === 0) {
+    blocks.push(
+      section(
+        "*:information_source: No candidates*\nReplies were fetched, but none looked like a meaningful question, complaint, or feature request.",
       ),
     );
   } else {
@@ -86,6 +102,82 @@ export function triageResultBlocks(result: ReplyTriageResult): SlackBlock[] {
     ),
   );
   return blocks;
+}
+
+export function draftApprovalBlocks(
+  draft: ReplyDraft,
+  approvalKey: string,
+): SlackBlock[] {
+  return [
+    header("Draft reply ready"),
+    section(
+      [
+        `*In reply to:* <${draft.replyURL}|@${slackText(draft.authorUsername)}>`,
+        `*Reason:* ${draft.reason}`,
+        `*Draft:*\n${boundedText(draft.text, 2800)}`,
+      ].join("\n"),
+    ),
+    actions([
+      button({
+        text: "Approve",
+        style: "primary",
+        actionId: APPROVE_ACTION_ID,
+        value: approvalKey,
+      }),
+      button({
+        text: "Reject",
+        style: "danger",
+        actionId: REJECT_ACTION_ID,
+        value: approvalKey,
+      }),
+    ]),
+  ];
+}
+
+export function draftDecisionBlocks(
+  draft: ReplyDraft,
+  decision: "approved" | "rejected",
+): SlackBlock[] {
+  return [
+    section(
+      [
+        decision === "approved"
+          ? `*:white_check_mark: Approved reply to* <${draft.replyURL}|@${slackText(draft.authorUsername)}>`
+          : `*:x: Rejected reply to* <${draft.replyURL}|@${slackText(draft.authorUsername)}>`,
+        boundedText(draft.text, 2800),
+      ].join("\n"),
+    ),
+  ];
+}
+
+export function postedResultBlocks(result: PostRepliesResult): SlackBlock[] {
+  if (result.posted.length === 0) {
+    return [
+      section(
+        "*No replies posted*\nNothing was approved, or there were no respond-now drafts.",
+      ),
+    ];
+  }
+  const lines = result.posted.map(
+    (item) =>
+      `• <${item.postedURL}|Posted> → <${item.replyURL}|original> · ${item.mode}\n  ${boundedText(item.text, 900)}`,
+  );
+  return [header("Posted to X"), ...boundedListSections("Replies", lines)];
+}
+
+export function createReadyBlocks(result: CreateDraftsResult): SlackBlock[] {
+  if (result.drafts.length === 0) {
+    return [
+      section(
+        "*No drafts to approve*\nThere were no respond-now candidates, so nothing will be posted.",
+      ),
+    ];
+  }
+  return [
+    section(
+      `*${String(result.drafts.length)} draft ${plural(result.drafts.length, "reply", "replies")} ready*\nApprove or reject each draft below. Publishing starts after every draft is decided.`,
+    ),
+  ];
 }
 
 export function failedBlocks(message: string): SlackBlock[] {

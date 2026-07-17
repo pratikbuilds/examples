@@ -83,7 +83,11 @@ async function collectSnapshot(): Promise<ReplySnapshot> {
     signal,
   );
   const result = await bundle.run(
-    { id: "snapshot", name: "replies_return_snapshot", arguments: {} },
+    {
+      id: "snapshot",
+      name: "replies_return_candidates",
+      arguments: { replyIds: ["124"] },
+    },
     signal,
   );
   expect(result.isError).not.toBe(true);
@@ -102,11 +106,15 @@ describe("collection tools", () => {
     expect(bundle.definitions.map((definition) => definition.name)).toEqual([
       "x_get_post",
       "x_get_post_replies",
-      "replies_return_snapshot",
+      "replies_return_candidates",
     ]);
     expect(await collectSnapshot()).toMatchObject({
       source: { postId: "123", authorUsername: "builder" },
-      coverage: { analyzedReplies: 1, searchWindow: "recent-7-days" },
+      coverage: {
+        fetchedReplies: 1,
+        analyzedReplies: 1,
+        searchWindow: "recent-7-days",
+      },
       replies: [{ id: "124", author: { username: "user" } }],
     });
   });

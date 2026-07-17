@@ -1,20 +1,38 @@
 import { defineTool, type BaseEnv } from "@intx/agent";
 
-import type { ReplySnapshot, ReplyTriage, XPost, XReplyCollection } from "./types";
+import type {
+  ApprovalPayload,
+  CreateDraftsResult,
+  PostedReply,
+  ReplyDraft,
+  ReplySnapshot,
+  ReplyTriage,
+  ReplyTriageResult,
+  XPost,
+  XReplyCollection,
+} from "./types";
 import {
   createReplySnapshot,
+  parseApprovalPayload,
+  parseReplyDrafts,
   parseReplyTriage,
   parseXStatusURL,
+  toCreateDraftsResult,
 } from "./validation";
 import {
   DEFAULT_REPLY_SAMPLE_SIZE,
   type XReadClient,
+  type XReplyPublisher,
 } from "./x-client";
 
 export const X_GET_POST_TOOL = "x_get_post";
 export const X_GET_POST_REPLIES_TOOL = "x_get_post_replies";
-export const REPLIES_RETURN_SNAPSHOT_TOOL = "replies_return_snapshot";
+export const REPLIES_RETURN_CANDIDATES_TOOL = "replies_return_candidates";
+/** @deprecated Use REPLIES_RETURN_CANDIDATES_TOOL */
+export const REPLIES_RETURN_SNAPSHOT_TOOL = REPLIES_RETURN_CANDIDATES_TOOL;
 export const REPLIES_PRESENT_TRIAGE_TOOL = "replies_present_triage";
+export const REPLIES_PRESENT_DRAFTS_TOOL = "replies_present_drafts";
+export const REPLIES_PUBLISH_APPROVED_TOOL = "replies_publish_approved";
 
 export type CollectState = {
   expectedURL: string;
@@ -67,12 +85,19 @@ export function createCollectXTools() {
           },
         },
         {
-          name: REPLIES_RETURN_SNAPSHOT_TOOL,
+          name: REPLIES_RETURN_CANDIDATES_TOOL,
           description:
-            "Return the trusted normalized source-and-replies snapshot after both X reads complete.",
+            "Return a trusted candidate snapshot containing only the selected reply ids from the fetched set.",
           inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+              replyIds: {
+                type: "array",
+                maxItems: DEFAULT_REPLY_SAMPLE_SIZE,
+                items: { type: "string" },
+              },
+            },
+            required: ["replyIds"],
             additionalProperties: false,
           },
         },
@@ -112,26 +137,30 @@ export function createCollectXTools() {
             return success(call.id, env.collectState.replies);
           }
 
-          if (call.name === REPLIES_RETURN_SNAPSHOT_TOOL) {
+          if (call.name === REPLIES_RETURN_CANDIDATES_TOOL) {
             if (env.collectState.snapshotReturned) {
-              throw new Error("replies_return_snapshot may be called only once");
+              throw new Error(
+                `${REPLIES_RETURN_CANDIDATES_TOOL} may be called only once`,
+              );
             }
             if (
               env.collectState.source === undefined ||
               env.collectState.replies === undefined
             ) {
               throw new Error(
-                "Call x_get_post and x_get_post_replies before returning the snapshot",
+                "Call x_get_post and x_get_post_replies before returning candidates",
               );
             }
+            const replyIds = parseReplyIdList(call.arguments.replyIds);
             const snapshot = createReplySnapshot(
               env.collectState.source,
               env.collectState.replies,
               env.collectState.expectedURL,
+              replyIds,
             );
             env.collectState.snapshotReturned = true;
             env.snapshotSink(snapshot);
-            return success(call.id, snapshot, "Reply snapshot accepted");
+            return success(call.id, snapshot, "Candidate snapshot accepted");
           }
 
           return failure(call.id, `Unknown tool: ${call.name}`);
@@ -157,7 +186,7 @@ export function createTriageTools() {
         {
           name: REPLIES_PRESENT_TRIAGE_TOOL,
           description:
-            "Submit one evidence-bound classification for every collected reply plus themes and amplification opportunities.",
+            "Submit one evidence-bound classification for every candidate reply plus themes and amplification opportunities.",
           inputSchema: triageInputSchema,
         },
       ],
@@ -177,12 +206,121 @@ export function createTriageTools() {
   });
 }
 
+export type CreateEnv = BaseEnv & {
+  triageResult: ReplyTriageResult;
+  draftsSink: (drafts: ReplyDraft[]) => void;
+};
+
+export function createDraftTools() {
+  return defineTool<CreateEnv>({
+    id: "@corbits/example-reply-triage/drafts",
+    requires: ["triageResult", "draftsSink"],
+    factory: (env) => ({
+      definitions: [
+        {
+          name: REPLIES_PRESENT_DRAFTS_TOOL,
+          description:
+            "Submit one short X reply draft for every respond-now classification.",
+          inputSchema: draftsInputSchema,
+        },
+      ],
+      async run(call) {
+        if (call.name !== REPLIES_PRESENT_DRAFTS_TOOL) {
+          return failure(call.id, `Unknown tool: ${call.name}`);
+        }
+        try {
+          const drafts = parseReplyDrafts(call.arguments, env.triageResult);
+          env.draftsSink(drafts);
+          return success(call.id, drafts, "Reply drafts accepted");
+        } catch (error) {
+          return failure(call.id, errorMessage(error));
+        }
+      },
+    }),
+  });
+}
+
+export type PostEnv = BaseEnv & {
+  approval: ApprovalPayload;
+  xPublisher: XReplyPublisher;
+  postSink: (posted: PostedReply[]) => void;
+};
+
+export function createPostTools() {
+  return defineTool<PostEnv>({
+    id: "@corbits/example-reply-triage/post",
+    requires: ["approval", "xPublisher", "postSink"],
+    factory: (env) => ({
+      definitions: [
+        {
+          name: REPLIES_PUBLISH_APPROVED_TOOL,
+          description:
+            "Publish every Slack-approved reply draft to X. Call with an empty object.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ],
+      async run(call, signal) {
+        if (call.name !== REPLIES_PUBLISH_APPROVED_TOOL) {
+          return failure(call.id, `Unknown tool: ${call.name}`);
+        }
+        try {
+          const approval = parseApprovalPayload(env.approval);
+          const posted: PostedReply[] = [];
+          for (const draft of approval.approved) {
+            const receipt = await env.xPublisher.reply(
+              {
+                text: draft.text,
+                inReplyToPostId: draft.replyId,
+              },
+              signal,
+            );
+            posted.push({
+              replyId: draft.replyId,
+              replyURL: draft.replyURL,
+              postedURL: receipt.url,
+              text: receipt.text,
+              mode: receipt.mode,
+            });
+          }
+          env.postSink(posted);
+          return success(call.id, posted, "Approved replies published");
+        } catch (error) {
+          return failure(call.id, errorMessage(error));
+        }
+      },
+    }),
+  });
+}
+
+export function buildCreateDraftsResult(
+  triageResult: ReplyTriageResult,
+  drafts: ReplyDraft[],
+): CreateDraftsResult {
+  return toCreateDraftsResult(triageResult, drafts);
+}
+
 function assertTriggerURL(state: CollectState, value: unknown): void {
   const actual = parseXStatusURL(value);
   const expected = parseXStatusURL(state.expectedURL);
   if (actual.postId !== expected.postId) {
     throw new Error("All collection tools must use the trigger URL");
   }
+}
+
+function parseReplyIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error("replyIds must be an array");
+  }
+  return value.map((item, index) => {
+    if (typeof item !== "string" || item.trim() === "") {
+      throw new Error(`replyIds[${String(index)}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
 }
 
 function success(callId: string, detail: unknown, content?: string) {
@@ -223,16 +361,7 @@ const triageInputSchema = {
           },
           reason: {
             type: "string",
-            enum: [
-              "question",
-              "complaint",
-              "purchase-intent",
-              "feature-request",
-              "misinformation",
-              "high-reach-author",
-              "praise",
-              "spam",
-            ],
+            enum: ["question", "complaint", "feature-request"],
           },
           summary: { type: "string" },
           recommendedOwner: {
@@ -301,5 +430,26 @@ const triageInputSchema = {
     "themes",
     "amplificationOpportunities",
   ],
+  additionalProperties: false,
+} as const;
+
+const draftsInputSchema = {
+  type: "object",
+  properties: {
+    drafts: {
+      type: "array",
+      maxItems: 25,
+      items: {
+        type: "object",
+        properties: {
+          replyId: replyIdSchema,
+          text: { type: "string" },
+        },
+        required: ["replyId", "text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["drafts"],
   additionalProperties: false,
 } as const;

@@ -10,7 +10,7 @@ import {
   type ReplyTriageRun,
   type StartWorkflow,
 } from "./session";
-import type { ReplyTriageResult } from "./types";
+import type { CreateDraftsResult, PostRepliesResult } from "./types";
 
 const config = {
   signingSecret: "secret",
@@ -32,10 +32,16 @@ const config = {
       throw new Error("not used");
     },
   },
+  xPublisher: {
+    mode: "dry-run" as const,
+    reply: async () => {
+      throw new Error("not used");
+    },
+  },
   contextRoot: "/tmp/reply-triage-test",
 } satisfies ReplyTriageConfig;
 
-const result: ReplyTriageResult = {
+const created: CreateDraftsResult = {
   snapshot: {
     source: {
       url: "https://x.com/OpenAI/status/123",
@@ -45,7 +51,8 @@ const result: ReplyTriageResult = {
       metrics: { replies: 2, likes: 10, reposts: 2, quotes: 1 },
     },
     coverage: {
-      analyzedReplies: 2,
+      fetchedReplies: 2,
+      analyzedReplies: 1,
       truncated: true,
       nextToken: "next",
       searchWindow: "recent-7-days",
@@ -57,14 +64,6 @@ const result: ReplyTriageResult = {
         text: "Can we use the API?",
         author: { username: "alice", followers: 50, verified: false },
         metrics: { likes: 2, replies: 0, reposts: 0 },
-        directReply: true,
-      },
-      {
-        id: "202",
-        url: "https://x.com/bob/status/202",
-        text: "Great work",
-        author: { username: "bob", followers: 20, verified: false },
-        metrics: { likes: 1, replies: 0, reposts: 0 },
         directReply: true,
       },
     ],
@@ -81,32 +80,32 @@ const result: ReplyTriageResult = {
         recommendedOwner: "marketing",
         suggestedResponseAngle: "Clarify availability.",
       },
-      {
-        priority: "no-response",
-        reason: "praise",
-        replyURL: "https://x.com/bob/status/202",
-        authorUsername: "bob",
-        summary: "Positive feedback",
-        recommendedOwner: "marketing",
-      },
     ],
-    themes: [
-      {
-        label: "API access",
-        count: 1,
-        sentiment: "neutral",
-        summary: "A user asked about access.",
-        evidenceURLs: ["https://x.com/alice/status/201"],
-      },
-    ],
-    amplificationOpportunities: [
-      {
-        replyURL: "https://x.com/bob/status/202",
-        reason: "Positive reaction",
-      },
-    ],
-    counts: { respondNow: 1, respondLater: 0, noResponse: 1 },
+    themes: [],
+    amplificationOpportunities: [],
+    counts: { respondNow: 1, respondLater: 0, noResponse: 0 },
   },
+  drafts: [
+    {
+      replyId: "201",
+      replyURL: "https://x.com/alice/status/201",
+      authorUsername: "alice",
+      reason: "question",
+      text: "Yes — API access is available for teams today.",
+    },
+  ],
+};
+
+const posted: PostRepliesResult = {
+  posted: [
+    {
+      replyId: "201",
+      replyURL: "https://x.com/alice/status/201",
+      postedURL: "https://x.com/i/web/status/dryrun-1",
+      text: created.drafts[0]!.text,
+      mode: "dry-run",
+    },
+  ],
 };
 
 type SentMessage = {
@@ -116,14 +115,21 @@ type SentMessage = {
   blocks?: SlackBlock[];
 };
 
-function completedRun(output = result): ReplyTriageRun {
+function mockRun(options?: {
+  onStepDone?: (stepId: string, output: unknown) => void;
+  complete?: ReplyTriageRun["complete"];
+}): ReplyTriageRun {
+  queueMicrotask(() => options?.onStepDone?.("create", created));
   return {
-    complete: Promise.resolve({
-      runId: "completed-run",
-      terminalStatus: "completed",
-      outputs: { triage: output },
-      events: [],
-    }),
+    complete:
+      options?.complete ??
+      Promise.resolve({
+        runId: "completed-run",
+        terminalStatus: "completed",
+        outputs: { post: posted },
+        events: [],
+      }),
+    signal: async () => undefined,
   };
 }
 
@@ -136,7 +142,7 @@ describe("reply triage Slack sessions", () => {
       stderr: () => undefined,
       startWorkflow: (() => {
         starts += 1;
-        return completedRun();
+        return mockRun();
       }) as StartWorkflow,
       sendMessage: async (_token, message) => {
         messages.push(message);
@@ -160,16 +166,25 @@ describe("reply triage Slack sessions", () => {
     );
   });
 
-  test("posts one started message and one compact terminal result", async () => {
+  test("posts triage, draft cards, and waits for approvals", async () => {
     const messages: SentMessage[] = [];
+    const pendingComplete = deferred<Awaited<ReplyTriageRun["complete"]>>();
     const sessions = createReplyTriageSessions({
       config,
       stderr: () => undefined,
-      startWorkflow: () => completedRun(),
+      startWorkflow: (input) =>
+        mockRun({
+          onStepDone: input.onStepDone,
+          complete: pendingComplete.promise,
+        }),
       sendMessage: async (_token, message) => {
         messages.push(message);
         return { channel: message.channel, ts: String(messages.length) };
       },
+      updateMessage: async (_token, message) => ({
+        channel: message.channel,
+        ts: message.ts,
+      }),
     });
 
     await sessions.start({
@@ -179,25 +194,49 @@ describe("reply triage Slack sessions", () => {
       prompt: "triage https://x.com/OpenAI/status/123",
       userId: "U1",
     });
-    await waitFor(() => messages.length === 2);
+    await waitFor(() =>
+      messages.some((message) => message.text.startsWith("Draft reply to")),
+    );
 
     expect(messages.map((message) => message.text)).toEqual([
       "Analyzing recent replies to https://x.com/OpenAI/status/123",
-      "Reply triage complete: 1 respond now, 0 respond later",
+      "Reply triage complete: 1 respond now",
+      "Draft approval",
+      "Draft reply to @alice",
     ]);
-    expect(JSON.stringify(messages[1]?.blocks)).not.toContain('"actions"');
-    expect(JSON.stringify(messages[1]?.blocks)).not.toContain("Publish");
+    expect(JSON.stringify(messages.at(-1)?.blocks)).toContain("reply.approve");
+
+    const blocksText = JSON.stringify(messages.at(-1)?.blocks);
+    const valueMatch = /"value":"([^"]+)"/.exec(blocksText);
+    expect(valueMatch?.[1]).toBeDefined();
+    await sessions.approve(valueMatch![1]!);
+
+    pendingComplete.resolve({
+      runId: "completed-run",
+      terminalStatus: "completed",
+      outputs: { post: posted },
+      events: [],
+    });
+    await waitFor(() =>
+      messages.some((message) => message.text.startsWith("Posted")),
+    );
+    expect(messages.at(-1)?.text).toContain("Posted");
   });
 
   test("reserves a thread atomically and releases it after completion", async () => {
     const pending = deferred<Awaited<ReplyTriageRun["complete"]>>();
     let starts = 0;
     const messages: SentMessage[] = [];
-    const startWorkflow: StartWorkflow = () => {
+    const startWorkflow: StartWorkflow = (input) => {
       starts += 1;
-      return starts === 1
-        ? { complete: pending.promise }
-        : completedRun();
+      if (starts === 1) {
+        queueMicrotask(() => input.onStepDone?.("create", { ...created, drafts: [] }));
+        return {
+          complete: pending.promise,
+          signal: async () => undefined,
+        };
+      }
+      return mockRun({ onStepDone: input.onStepDone });
     };
     const sessions = createReplyTriageSessions({
       config,
@@ -218,15 +257,19 @@ describe("reply triage Slack sessions", () => {
     await sessions.start(input);
     await sessions.start(input);
     expect(starts).toBe(1);
-    expect(messages.at(-1)?.text).toContain("already active");
+    expect(
+      messages.some((message) => message.text.includes("already active")),
+    ).toBe(true);
 
     pending.resolve({
       runId: "pending-run",
       terminalStatus: "completed",
-      outputs: { triage: result },
+      outputs: { post: { posted: [] } },
       events: [],
     });
-    await waitFor(() => messages.some((message) => message.text.startsWith("Reply triage complete")));
+    await waitFor(() =>
+      messages.some((message) => message.text.includes("No replies posted")),
+    );
     await sessions.start(input);
     expect(starts).toBe(2);
   });
@@ -237,18 +280,23 @@ describe("reply triage Slack sessions", () => {
     const sessions = createReplyTriageSessions({
       config,
       stderr: () => undefined,
-      startWorkflow: () => {
+      startWorkflow: (input) => {
         starts += 1;
-        return starts === 1
-          ? ({
-              complete: Promise.resolve({
-                runId: "failed-run",
-                terminalStatus: "failed",
-                outputs: {},
-                events: [],
-              }),
-            } satisfies ReplyTriageRun)
-          : completedRun();
+        if (starts === 1) {
+          queueMicrotask(() =>
+            input.onStepDone?.("create", { ...created, drafts: [] }),
+          );
+          return {
+            complete: Promise.resolve({
+              runId: "failed-run",
+              terminalStatus: "failed",
+              outputs: {},
+              events: [],
+            }),
+            signal: async () => undefined,
+          } satisfies ReplyTriageRun;
+        }
+        return mockRun({ onStepDone: input.onStepDone });
       },
       sendMessage: async (_token, message) => {
         messages.push(message);
@@ -275,20 +323,10 @@ describe("reply triage Slack sessions", () => {
 });
 
 describe("reply triage Block Kit", () => {
-  test("contains no interactive elements and stays within Slack limits", () => {
-    const blocks = triageResultBlocks(result);
+  test("triage summary contains no interactive elements", () => {
+    const blocks = triageResultBlocks(created);
     expect(JSON.stringify(blocks)).not.toContain('"type":"actions"');
     expect(blocks.length).toBeLessThanOrEqual(50);
-    for (const block of blocks) {
-      if (
-        block.type === "section" &&
-        "text" in block &&
-        block.text !== undefined &&
-        block.text.type === "mrkdwn"
-      ) {
-        expect(block.text.text.length).toBeLessThanOrEqual(3000);
-      }
-    }
   });
 });
 

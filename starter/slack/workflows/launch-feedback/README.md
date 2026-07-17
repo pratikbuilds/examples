@@ -1,21 +1,18 @@
 # Slack X reply triage workflow
 
-A small, read-only `@intx/workflow` for marketing teams. Give the Slack app one
-full X status URL and it returns the recent replies that need attention,
-recurring themes, and positive replies worth amplifying.
+Give the Slack app one full X status URL. It selects high-signal replies
+(questions, complaints, feature requests), drafts responses for respond-now
+items, and posts only after per-draft Slack approval.
 
 ```text
-Slack X status URL -> collect -> triage -> complete
-                       |           |
-                       |           `- replies_present_triage
-                       `- x_get_post
-                          x_get_post_replies
-                          replies_return_snapshot
+Slack X status URL -> collect -> triage -> create -> approve -> post
 ```
 
-There are no drafts, approval buttons, parked runs, or X mutations. The collect
-agent can only read X. The triage agent receives the validated collect output,
-has no X client, and can only submit an evidence-bound triage result.
+- collect: fetch replies, keep question / complaint / feature-request candidates
+- triage: classify candidates and set respond-now priority
+- create: draft one X reply per respond-now item
+- approve: per-draft Slack Approve / Reject
+- post: publish only approved drafts (`X_DRY_RUN=1` for dry-run)
 
 ## Setup
 

@@ -1,7 +1,10 @@
 import type {
-  ReplyReason,
+  ApprovalPayload,
+  CreateDraftsResult,
+  ReplyDraft,
   ReplySnapshot,
   ReplyTriage,
+  ReplyTriageResult,
   XPost,
   XReplyCollection,
 } from "./types";
@@ -56,6 +59,7 @@ export function createReplySnapshot(
   source: XPost,
   replyCollection: XReplyCollection,
   expectedURL: string,
+  selectedReplyIds?: readonly string[],
 ): ReplySnapshot {
   const expected = parseXStatusURL(expectedURL);
   const sourceRef = parseXStatusURL(source.url);
@@ -99,58 +103,60 @@ export function createReplySnapshot(
 
   const replyIds = new Set<string>();
   const replyURLs = new Set<string>();
-  const replies = replyCollection.replies.map((reply, index) => {
-      const path = `replies[${String(index)}]`;
-      const ref = parseXStatusURL(reply.url);
-      if (ref.postId !== reply.id) {
-        throw new Error(`${path}.url must contain the reply id`);
-      }
-      if (replyIds.has(reply.id) || replyURLs.has(ref.canonicalURL)) {
-        throw new Error(`${path} is a duplicate reply`);
-      }
-      replyIds.add(reply.id);
-      replyURLs.add(ref.canonicalURL);
-      const author = reply.author;
-      const authorMetrics = author?.publicMetrics;
-      const metrics = reply.publicMetrics;
-      if (author === undefined || authorMetrics === undefined || metrics === undefined) {
-        throw new Error(`${path} must include author and public metrics`);
-      }
-      if (reply.conversationId !== source.id) {
-        throw new Error(`${path} must belong to the source conversation`);
-      }
-      if (
-        statusUsername(ref.canonicalURL).toLowerCase() !==
-        author.username.toLowerCase()
-      ) {
-        throw new Error(`${path}.url must match the expanded author`);
-      }
-      return {
-        id: reply.id,
-        url: ref.canonicalURL,
-        text: reply.text,
-        author: {
-          username: author.username,
-          followers: nonNegativeInteger(
-            authorMetrics.followers,
-            `${path}.author.followers`,
-          ),
-          verified: author.verified === true,
-        },
-        metrics: {
-          likes: nonNegativeInteger(metrics.likes, `${path}.metrics.likes`),
-          replies: nonNegativeInteger(
-            metrics.replies,
-            `${path}.metrics.replies`,
-          ),
-          reposts: nonNegativeInteger(
-            metrics.reposts,
-            `${path}.metrics.reposts`,
-          ),
-        },
-        directReply: reply.directReply,
-      };
-    });
+  const fetched = replyCollection.replies.map((reply, index) => {
+    const path = `replies[${String(index)}]`;
+    const ref = parseXStatusURL(reply.url);
+    if (ref.postId !== reply.id) {
+      throw new Error(`${path}.url must contain the reply id`);
+    }
+    if (replyIds.has(reply.id) || replyURLs.has(ref.canonicalURL)) {
+      throw new Error(`${path} is a duplicate reply`);
+    }
+    replyIds.add(reply.id);
+    replyURLs.add(ref.canonicalURL);
+    const author = reply.author;
+    const authorMetrics = author?.publicMetrics;
+    const metrics = reply.publicMetrics;
+    if (author === undefined || authorMetrics === undefined || metrics === undefined) {
+      throw new Error(`${path} must include author and public metrics`);
+    }
+    if (reply.conversationId !== source.id) {
+      throw new Error(`${path} must belong to the source conversation`);
+    }
+    if (
+      statusUsername(ref.canonicalURL).toLowerCase() !==
+      author.username.toLowerCase()
+    ) {
+      throw new Error(`${path}.url must match the expanded author`);
+    }
+    return {
+      id: reply.id,
+      url: ref.canonicalURL,
+      text: reply.text,
+      author: {
+        username: author.username,
+        followers: nonNegativeInteger(
+          authorMetrics.followers,
+          `${path}.author.followers`,
+        ),
+        verified: author.verified === true,
+      },
+      metrics: {
+        likes: nonNegativeInteger(metrics.likes, `${path}.metrics.likes`),
+        replies: nonNegativeInteger(
+          metrics.replies,
+          `${path}.metrics.replies`,
+        ),
+        reposts: nonNegativeInteger(
+          metrics.reposts,
+          `${path}.metrics.reposts`,
+        ),
+      },
+      directReply: reply.directReply,
+    };
+  });
+
+  const replies = selectCandidateReplies(fetched, selectedReplyIds);
 
   return {
     source: {
@@ -166,7 +172,8 @@ export function createReplySnapshot(
       },
     },
     coverage: {
-      analyzedReplies: replyCollection.analyzedReplies,
+      fetchedReplies: replyCollection.analyzedReplies,
+      analyzedReplies: replies.length,
       truncated: replyCollection.truncated,
       searchWindow: "recent-7-days",
       ...(replyCollection.nextToken !== undefined
@@ -177,6 +184,27 @@ export function createReplySnapshot(
   };
 }
 
+function selectCandidateReplies(
+  fetched: ReplySnapshot["replies"],
+  selectedReplyIds: readonly string[] | undefined,
+): ReplySnapshot["replies"] {
+  if (selectedReplyIds === undefined) return fetched;
+  const byId = new Map(fetched.map((reply) => [reply.id, reply]));
+  const seen = new Set<string>();
+  return selectedReplyIds.map((replyId, index) => {
+    const path = `selectedReplyIds[${String(index)}]`;
+    if (seen.has(replyId)) {
+      throw new Error(`${path} is a duplicate reply id`);
+    }
+    seen.add(replyId);
+    const reply = byId.get(replyId);
+    if (reply === undefined) {
+      throw new Error(`${path} is not in the fetched reply set`);
+    }
+    return reply;
+  });
+}
+
 export function parseReplyTriage(
   value: unknown,
   snapshot: ReplySnapshot,
@@ -184,7 +212,6 @@ export function parseReplyTriage(
   const input = requiredRecord(value, "reply triage");
   const repliesById = new Map(snapshot.replies.map((reply) => [reply.id, reply]));
   const classified = new Set<string>();
-  const classificationReasons = new Map<string, ReplyReason>();
   const classifications = boundedArray(
     input.classifications,
     "classifications",
@@ -207,33 +234,9 @@ export function parseReplyTriage(
     );
     const reason = requiredEnum(
       classification.reason,
-      [
-        "question",
-        "complaint",
-        "purchase-intent",
-        "feature-request",
-        "misinformation",
-        "high-reach-author",
-        "praise",
-        "spam",
-      ] as const,
+      ["question", "complaint", "feature-request"] as const,
       `${path}.reason`,
     );
-    if (
-      priority === "respond-now" &&
-      ![
-        "question",
-        "complaint",
-        "purchase-intent",
-        "feature-request",
-        "misinformation",
-      ].includes(reason)
-    ) {
-      throw new Error(
-        `${path}.reason ${reason} cannot justify respond-now`,
-      );
-    }
-    classificationReasons.set(replyId, reason);
     const suggestedResponseAngle = optionalString(
       classification.suggestedResponseAngle,
       `${path}.suggestedResponseAngle`,
@@ -312,11 +315,6 @@ export function parseReplyTriage(
     const replyId = requiredString(opportunity.replyId, `${path}.replyId`);
     const reply = repliesById.get(replyId);
     if (reply === undefined) throw new Error(`${path} contains unknown reply ${replyId}`);
-    if (classificationReasons.get(replyId) !== "praise") {
-      throw new Error(
-        `${path} must cite a reply classified as praise`,
-      );
-    }
     if (amplificationReplyIds.has(replyId)) {
       throw new Error(`${path} contains duplicate reply ${replyId}`);
     }
@@ -334,20 +332,111 @@ export function parseReplyTriage(
       amplificationOpportunities.length !== 0)
   ) {
     throw new Error(
-      "classifications, themes, and amplification opportunities must be empty when recent search returns no replies",
+      "classifications, themes, and amplification opportunities must be empty when no candidate replies were selected",
     );
   }
 
   return {
-    overview:
-      snapshot.coverage.analyzedReplies === 0
-        ? "X recent search returned no replies in its available window. This does not establish historical absence of replies."
-        : requiredString(input.overview, "overview"),
+    overview: emptyCandidateOverview(snapshot, input.overview),
     classifications,
     themes,
     amplificationOpportunities,
     counts: derivedCounts,
   };
+}
+
+export function parseReplyDrafts(
+  value: unknown,
+  triageResult: ReplyTriageResult,
+): ReplyDraft[] {
+  const input = requiredRecord(value, "reply drafts");
+  const draftsInput = boundedArray(input.drafts, "drafts", 25);
+  const respondNow = triageResult.triage.classifications.filter(
+    (item) => item.priority === "respond-now",
+  );
+  const drafted = new Set<string>();
+  const drafts = draftsInput.map((item, index) => {
+    const path = `drafts[${String(index)}]`;
+    const draft = requiredRecord(item, path);
+    const replyId = requiredString(draft.replyId, `${path}.replyId`);
+    const reply = triageResult.snapshot.replies.find((entry) => entry.id === replyId);
+    if (reply === undefined) {
+      throw new Error(`${path}.replyId is not a candidate reply`);
+    }
+    if (drafted.has(replyId)) {
+      throw new Error(`${path}.replyId is duplicated`);
+    }
+    drafted.add(replyId);
+    const classification = respondNow.find(
+      (entry) => entry.replyURL === reply.url,
+    );
+    if (classification === undefined) {
+      throw new Error(`${path} must target a respond-now classification`);
+    }
+    return {
+      replyId,
+      replyURL: reply.url,
+      authorUsername: reply.author.username,
+      reason: classification.reason,
+      text: requiredString(draft.text, `${path}.text`),
+    };
+  });
+  if (drafts.length !== respondNow.length || drafted.size !== respondNow.length) {
+    throw new Error(
+      "drafts must include exactly one entry for every respond-now classification",
+    );
+  }
+  return drafts;
+}
+
+export function parseApprovalPayload(value: unknown): ApprovalPayload {
+  const input = requiredRecord(value, "approval payload");
+  const approved = boundedArray(input.approved, "approved", 25).map(
+    (item, index) => parseApprovedDraft(item, `approved[${String(index)}]`),
+  );
+  return { approved };
+}
+
+function parseApprovedDraft(value: unknown, path: string): ReplyDraft {
+  const draft = requiredRecord(value, path);
+  return {
+    replyId: requiredString(draft.replyId, `${path}.replyId`),
+    replyURL: parseXStatusURL(draft.replyURL).canonicalURL,
+    authorUsername: requiredString(
+      draft.authorUsername,
+      `${path}.authorUsername`,
+    ),
+    reason: requiredEnum(
+      draft.reason,
+      ["question", "complaint", "feature-request"] as const,
+      `${path}.reason`,
+    ),
+    text: requiredString(draft.text, `${path}.text`),
+  };
+}
+
+export function toCreateDraftsResult(
+  triageResult: ReplyTriageResult,
+  drafts: ReplyDraft[],
+): CreateDraftsResult {
+  return {
+    snapshot: triageResult.snapshot,
+    triage: triageResult.triage,
+    drafts,
+  };
+}
+
+function emptyCandidateOverview(
+  snapshot: ReplySnapshot,
+  overview: unknown,
+): string {
+  if (snapshot.coverage.analyzedReplies !== 0) {
+    return requiredString(overview, "overview");
+  }
+  if (snapshot.coverage.fetchedReplies === 0) {
+    return "X recent search returned no replies in its available window. This does not establish historical absence of replies.";
+  }
+  return "Recent replies were fetched, but none were kept as question, complaint, or feature-request candidates.";
 }
 
 function parseReplyEvidence(
