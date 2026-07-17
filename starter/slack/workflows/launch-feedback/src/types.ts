@@ -50,6 +50,95 @@ export type XReplyCollection = {
   };
 };
 
+export type ReplyTriageTrigger = {
+  url: string;
+  request: string;
+  slack: {
+    teamId?: string;
+    channel: string;
+    threadTs: string;
+    requestedBy?: string;
+  };
+};
+
+export type ReplySnapshot = {
+  source: {
+    url: string;
+    postId: string;
+    authorUsername: string;
+    text: string;
+    metrics: {
+      replies: number;
+      likes: number;
+      reposts: number;
+      quotes: number;
+    };
+  };
+  coverage: {
+    analyzedReplies: number;
+    truncated: boolean;
+    nextToken?: string;
+    searchWindow: "recent-7-days";
+  };
+  replies: Array<{
+    id: string;
+    url: string;
+    text: string;
+    author: {
+      username: string;
+      followers: number;
+      verified: boolean;
+    };
+    metrics: {
+      likes: number;
+      replies: number;
+      reposts: number;
+    };
+    directReply: boolean;
+  }>;
+};
+
+export type ReplyPriority = "respond-now" | "respond-later" | "no-response";
+
+export type ReplyReason =
+  | "question"
+  | "complaint"
+  | "purchase-intent"
+  | "feature-request"
+  | "misinformation"
+  | "high-reach-author"
+  | "praise"
+  | "spam";
+
+export type ReplyTriage = {
+  overview: string;
+  classifications: Array<{
+    priority: ReplyPriority;
+    reason: ReplyReason;
+    replyURL: string;
+    authorUsername: string;
+    summary: string;
+    recommendedOwner: "marketing" | "support" | "product";
+    suggestedResponseAngle?: string;
+  }>;
+  themes: Array<{
+    label: string;
+    count: number;
+    sentiment: "positive" | "mixed" | "negative" | "neutral";
+    summary: string;
+    evidenceURLs: string[];
+  }>;
+  amplificationOpportunities: Array<{
+    replyURL: string;
+    reason: string;
+  }>;
+  counts: {
+    respondNow: number;
+    respondLater: number;
+    noResponse: number;
+  };
+};
+
 export type FollowUpDraft = {
   strategy: "concise-recap" | "what-we-heard" | "next-steps";
   title: string;
