@@ -200,6 +200,7 @@ describe("reply triage Slack sessions", () => {
 
     expect(messages.map((message) => message.text)).toEqual([
       "Analyzing recent replies to https://x.com/OpenAI/status/123",
+      "Status: Collect candidates from X",
       "Reply triage complete: 1 respond now",
       "Draft approval",
       "Draft reply to @alice",
@@ -246,6 +247,10 @@ describe("reply triage Slack sessions", () => {
         messages.push(message);
         return { channel: message.channel, ts: String(messages.length) };
       },
+      updateMessage: async (_token, message) => ({
+        channel: message.channel,
+        ts: message.ts,
+      }),
     });
     const input = {
       teamId: "T1",
@@ -302,6 +307,10 @@ describe("reply triage Slack sessions", () => {
         messages.push(message);
         return { channel: message.channel, ts: String(messages.length) };
       },
+      updateMessage: async (_token, message) => ({
+        channel: message.channel,
+        ts: message.ts,
+      }),
     });
     const input = {
       teamId: "T1",

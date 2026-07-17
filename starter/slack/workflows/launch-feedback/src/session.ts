@@ -15,8 +15,10 @@ import {
   failedBlocks,
   invalidURLBlocks,
   postedResultBlocks,
+  progressBlocks,
   startedBlocks,
   triageResultBlocks,
+  type ProgressPhase,
 } from "./blocks";
 import type { ReplyTriageConfig } from "./config";
 import { createInvokeStep, createWorkflowAuthorize } from "./invoke-step";
@@ -38,6 +40,7 @@ export type ReplyTriageRun = Pick<WorkflowRun, "complete" | "signal">;
 export type StartWorkflow = (input: {
   triggerPayload: ReplyTriageTrigger;
   log: (line: string) => void;
+  onStepStart?: (stepId: string) => void;
   onStepDone?: (stepId: string, output: unknown) => void;
 }) => ReplyTriageRun;
 
@@ -55,6 +58,7 @@ type PendingRun = {
   thread: SlackThreadRef;
   run: ReplyTriageRun;
   drafts: Map<string, PendingDraft>;
+  progressTs?: string;
   signaled: boolean;
   status: "running" | "awaiting-approval" | "finishing" | "finished";
 };
@@ -97,6 +101,7 @@ export function createReplyTriageSessions(options: {
           contextRoot: config.contextRoot,
           authorize,
           log: input.log,
+          onStepStart: input.onStepStart,
           onStepDone: input.onStepDone,
         }),
         authorize,
@@ -146,6 +151,13 @@ export function createReplyTriageSessions(options: {
         text: `Analyzing recent replies to ${url}`,
         blocks: startedBlocks(url),
       });
+      const progress = await sendMessage(config.botToken, {
+        channel: input.channel,
+        thread_ts: input.threadTs,
+        text: "Status: Collect candidates from X",
+        blocks: progressBlocks("collecting"),
+      });
+      const pendingHolder: { current?: PendingRun } = {};
       const run = startWorkflow({
         triggerPayload: {
           url,
@@ -158,6 +170,10 @@ export function createReplyTriageSessions(options: {
           },
         },
         log: (line) => stderr(`slack-x-reply-triage: ${line}\n`),
+        onStepStart(stepId) {
+          const pending = pendingHolder.current;
+          if (pending !== undefined) setProgress(pending, phaseForStepStart(stepId));
+        },
         onStepDone(stepId, output) {
           if (stepId === "create") {
             createReady.resolve(output as CreateDraftsResult);
@@ -169,9 +185,11 @@ export function createReplyTriageSessions(options: {
         thread,
         run,
         drafts: new Map(),
+        progressTs: progress.ts,
         signaled: false,
         status: "running",
       };
+      pendingHolder.current = pending;
       pendingByThread.set(key, pending);
       watching = true;
       void handleCreateReady(pending, createReady.promise);
@@ -182,6 +200,26 @@ export function createReplyTriageSessions(options: {
     } finally {
       if (!watching) pendingByThread.delete(key);
     }
+  }
+
+  function setProgress(pending: PendingRun, phase: ProgressPhase): void {
+    if (pending.progressTs === undefined || pending.status === "finished") {
+      return;
+    }
+    void editMessage(config.botToken, {
+      channel: pending.thread.channel,
+      ts: pending.progressTs,
+      text: `Status: ${phase}`,
+      blocks: progressBlocks(phase),
+    }).catch(() => undefined);
+  }
+
+  function phaseForStepStart(stepId: string): ProgressPhase {
+    if (stepId === "collect") return "collecting";
+    if (stepId === "triage") return "triaging";
+    if (stepId === "create") return "drafting";
+    if (stepId === "post") return "publishing";
+    return "collecting";
   }
 
   async function approve(key: string): Promise<void> {
@@ -243,11 +281,13 @@ export function createReplyTriageSessions(options: {
 
       if (created.drafts.length === 0) {
         pending.status = "awaiting-approval";
+        setProgress(pending, "publishing");
         await signalApproval(pending, { approved: [] });
         return;
       }
 
       pending.status = "awaiting-approval";
+      setProgress(pending, "awaiting-approval");
       for (const draft of created.drafts) {
         const draftKey = `${pending.key}:${draft.replyId}`;
         const posted = await sendMessage(config.botToken, {
@@ -292,6 +332,7 @@ export function createReplyTriageSessions(options: {
     if (pending.signaled) return;
     pending.signaled = true;
     pending.status = "finishing";
+    setProgress(pending, "publishing");
     await pending.run.signal(APPROVAL_SIGNAL, payload);
   }
 
@@ -303,6 +344,7 @@ export function createReplyTriageSessions(options: {
       }
       const result = completed.outputs.post as PostRepliesResult | undefined;
       if (result === undefined) throw new Error("Post step returned no output");
+      setProgress(pending, "done");
       await sendMessage(config.botToken, {
         channel: pending.thread.channel,
         thread_ts: pending.thread.threadTs,

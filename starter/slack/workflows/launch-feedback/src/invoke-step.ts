@@ -88,6 +88,7 @@ export function createInvokeStep(options: {
   xPublisher: XReplyPublisher;
   contextRoot: string;
   authorize?: WorkflowAuthorizeFn;
+  onStepStart?: (stepId: string) => void;
   onStepDone?: (stepId: string, output: unknown) => void;
   runAgent?: RunReplyTriageAgent;
   log?: (line: string) => void;
@@ -198,6 +199,7 @@ export function createInvokeStep(options: {
     }
 
     safelyObserve(() => options.log?.(`step ${stepId}: ${agent.id} running`));
+    safelyObserve(() => options.onStepStart?.(stepId));
     const prompt = buildAgentPrompt(agent.id, input);
     await runAgent(agent, env, prompt, signal);
 

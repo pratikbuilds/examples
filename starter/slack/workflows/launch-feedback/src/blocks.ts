@@ -16,12 +16,43 @@ import type {
 export const APPROVE_ACTION_ID = "reply.approve";
 export const REJECT_ACTION_ID = "reply.reject";
 
+export type ProgressPhase =
+  | "collecting"
+  | "triaging"
+  | "drafting"
+  | "awaiting-approval"
+  | "publishing"
+  | "done";
+
 export function startedBlocks(url: string): SlackBlock[] {
   return [
     section(
       `*Reply triage started*\nReading the post and recent replies for <${url}|this X post>.`,
     ),
   ];
+}
+
+export function progressBlocks(phase: ProgressPhase): SlackBlock[] {
+  const steps: Array<{ id: ProgressPhase; label: string }> = [
+    { id: "collecting", label: "Collect candidates from X" },
+    { id: "triaging", label: "Classify questions, complaints, feature requests" },
+    { id: "drafting", label: "Draft respond-now replies" },
+    { id: "awaiting-approval", label: "Wait for Slack approve / reject" },
+    { id: "publishing", label: "Post approved replies to X" },
+  ];
+  const activeIndex = steps.findIndex((step) => step.id === phase);
+  const lines = steps.map((step, index) => {
+    const mark =
+      phase === "done" || index < activeIndex
+        ? "✓"
+        : index === activeIndex
+          ? "…"
+          : "·";
+    return `${mark} ${step.label}`;
+  });
+  const title =
+    phase === "done" ? "*Status:* done" : `*Status:* ${steps[activeIndex]?.label ?? "working"}`;
+  return [section(`${title}\n${lines.join("\n")}`)];
 }
 
 export function invalidURLBlocks(): SlackBlock[] {
