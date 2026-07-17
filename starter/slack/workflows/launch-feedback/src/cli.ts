@@ -32,7 +32,9 @@ export async function main(
     config: resolved.config,
     stderr,
   });
-  stderr("X reader=live, mutations=disabled\n");
+  stderr(
+    `X reader=live, replies=${resolved.config.xPublisher.mode === "dry-run" ? "dry-run" : "live"}\n`,
+  );
 
   try {
     await startSlackBridge({

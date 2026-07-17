@@ -235,13 +235,27 @@ export function createReplyTriageSessions(options: {
     decision: DraftDecision,
   ): Promise<void> {
     const ref = draftByKey.get(key);
-    if (ref === undefined) return;
+    if (ref === undefined) {
+      stderr(`slack-x-reply-triage: ignore ${decision}; unknown draft key\n`);
+      return;
+    }
     const pending = pendingByThread.get(ref.threadKey);
-    if (pending === undefined || pending.status !== "awaiting-approval") return;
+    if (pending === undefined || pending.status !== "awaiting-approval") {
+      stderr(
+        `slack-x-reply-triage: ignore ${decision}; run not awaiting approval\n`,
+      );
+      return;
+    }
     const draft = pending.drafts.get(ref.draftKey);
-    if (draft === undefined || draft.decision !== undefined) return;
+    if (draft === undefined || draft.decision !== undefined) {
+      stderr(`slack-x-reply-triage: ignore ${decision}; draft already settled\n`);
+      return;
+    }
 
     draft.decision = decision;
+    stderr(
+      `slack-x-reply-triage: draft ${draft.draft.replyId} ${decision}\n`,
+    );
     await editMessage(config.botToken, {
       channel: pending.thread.channel,
       ts: draft.messageTs,

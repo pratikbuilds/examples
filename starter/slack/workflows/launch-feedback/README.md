@@ -24,9 +24,10 @@ cd starter/slack/workflows/launch-feedback
 cp .env.example .env
 ```
 
-Import `manifest.slack.json` into Slack, enable Socket Mode, install or reinstall
-the app, and invite it to the test channel. Configure the Slack, model, and four
-X OAuth credentials in `.env`. X credentials are used only for live reads.
+Import `manifest.slack.json` into Slack (Interactivity must be enabled), turn on
+Socket Mode, install or reinstall the app, and invite it to the test channel.
+Configure the Slack, model, and four X OAuth credentials in `.env`. Set
+`X_DRY_RUN=1` to approve drafts without publishing live replies.
 
 ## Run
 
