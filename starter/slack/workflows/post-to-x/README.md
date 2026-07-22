@@ -11,7 +11,7 @@ draft -> policy -> approval -> publish
 
 - `draft` is the only inference step.
 - `policy` deterministically trims and NFC-normalizes the draft, then validates
-  it with X's weighted-character rules and a 280-character limit.
+  it with a 280-character limit.
 - `approval` waits for the Slack Approve signal. Reject cancels the run.
 - `publish` deterministically passes the exact approved text to the selected
   publisher. It does not run another model turn or accept replacement Slack
@@ -44,7 +44,7 @@ Mention the app in a channel:
 @interchange-social write a concise launch post for our new workflow demo
 ```
 
-The app posts the policy-approved text and weighted length. Approve to receive
+The app posts the policy-approved text and character count. Approve to receive
 a receipt in the same thread, or Reject to cancel without publishing.
 
 ## Publisher mode
@@ -69,10 +69,10 @@ its OAuth 1.0a consumer key/secret and access token/secret. Set `X_LIVE=1` only
 for a separately authorized live run. Approval sends the exact normalized text
 shown in Slack to `POST /2/tweets`.
 
-The live publisher permits one attempt. It does not automatically retry an X
-request because a timeout or process crash can leave the write outcome unknown,
-and X does not provide an idempotency key for this endpoint. After an uncertain
-outcome, inspect X before starting a new run.
+Each workflow run permits one live publish attempt. It does not automatically
+retry an X request because a timeout or process crash can leave the write
+outcome unknown, and X does not provide an idempotency key for this endpoint.
+After an uncertain outcome, inspect X before starting a new run.
 
 Socket Mode does not need a public tunnel. Each Slack thread can have one active
 run. An approval card is bound to that exact workflow run, Slack team, channel,

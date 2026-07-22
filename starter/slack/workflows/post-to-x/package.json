@@ -18,10 +18,9 @@
     "@intx/agent": "workspace:*",
     "@intx/storage-isogit": "workspace:*",
     "@intx/workflow": "workspace:*",
-    "twitter-text": "3.1.0"
+    "arktype": "catalog:"
   },
   "devDependencies": {
-    "@types/twitter-text": "3.1.10",
     "typescript": "5.9.3"
   }
 }

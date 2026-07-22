@@ -12,30 +12,30 @@ import type { PostReceipt } from "./x-client";
 export const APPROVE_ACTION_ID = "post-to-x.approve";
 export const REJECT_ACTION_ID = "post-to-x.reject";
 
-export function startedBlocks(runId: string): SlackBlock[] {
-  return [section(`*Post-to-X workflow started*\nRun \`${runId}\` is drafting now.`)];
+export function startedBlocks(runID: string): SlackBlock[] {
+  return [section(`*Post-to-X workflow started*\nRun \`${runID}\` is drafting now.`)];
 }
 
 export function approvalBlocks(
   approved: ApprovedPost,
-  approvalId: string,
+  approvalID: string,
 ): SlackBlock[] {
   return [
     header("Post ready for approval"),
     section(truncateBlockText(approved.text)),
-    section(`${approved.weightedLength}/${approved.limit} weighted characters`),
+    section(`${approved.length}/${approved.limit} characters`),
     actions([
       button({
         text: "Approve",
         style: "primary",
         actionId: APPROVE_ACTION_ID,
-        value: approvalId,
+        value: approvalID,
       }),
       button({
         text: "Reject",
         style: "danger",
         actionId: REJECT_ACTION_ID,
-        value: approvalId,
+        value: approvalID,
       }),
     ]),
   ];
@@ -61,9 +61,6 @@ export function rejectedBlocks(): SlackBlock[] {
 
 export function receiptBlocks(receipt: PostReceipt): SlackBlock[] {
   if (receipt.mode === "live") {
-    if (receipt.url === undefined) {
-      throw new Error("live X receipt is missing its URL");
-    }
     return [
       header("Posted to X"),
       section(`<${receipt.url}|View post>`),

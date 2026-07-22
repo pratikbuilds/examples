@@ -1,55 +1,47 @@
-import twitterText from "twitter-text";
+import { type } from "arktype";
 
-export type ApprovedPost = Readonly<{
-  text: string;
-  weightedLength: number;
-  limit: 280;
-}>;
+const DraftInput = type("string").or({ text: "string" });
+
+const ApprovedPost = type({
+  text: "string",
+  length: "number",
+  limit: "280",
+});
+
+export type ApprovedPost = typeof ApprovedPost.infer;
 
 export function validateXPost(input: unknown): ApprovedPost {
-  const raw =
-    typeof input === "string"
-      ? input
-      : isRecord(input) && typeof input.text === "string"
-        ? input.text
-        : undefined;
+  const draft = DraftInput(input);
+  if (draft instanceof type.errors) {
+    throw new Error("draft must contain post text");
+  }
 
-  const text = raw?.trim().normalize("NFC");
-  if (text === undefined || text === "") {
+  const text = (typeof draft === "string" ? draft : draft.text)
+    .trim()
+    .normalize("NFC");
+  if (text === "") {
     throw new Error("draft must contain non-empty post text");
   }
 
-  const parsed = twitterText.parseTweet(text);
-  if (!parsed.valid || parsed.weightedLength > 280) {
-    throw new Error(
-      `draft is not valid for X (${parsed.weightedLength}/280 weighted characters)`,
-    );
+  const length = Array.from(text).length;
+  if (length > 280) {
+    throw new Error(`draft is too long for X (${length}/280 characters)`);
   }
 
   return Object.freeze({
     text,
-    weightedLength: parsed.weightedLength,
+    length,
     limit: 280,
   });
 }
 
 export function requireApprovedPost(input: unknown): ApprovedPost {
-  if (
-    !isRecord(input) ||
-    typeof input.text !== "string" ||
-    typeof input.weightedLength !== "number" ||
-    input.limit !== 280
-  ) {
-    throw new Error("publish input must be an approved X post");
+  const approvedPost = ApprovedPost(input);
+  if (approvedPost instanceof type.errors) {
+    throw new Error(
+      `publish input must be an approved X post: ${approvedPost.summary}`,
+    );
   }
 
-  return Object.freeze({
-    text: input.text,
-    weightedLength: input.weightedLength,
-    limit: 280,
-  });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return Object.freeze(approvedPost);
 }

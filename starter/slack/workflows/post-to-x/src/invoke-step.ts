@@ -30,61 +30,78 @@ export function createPostStepInvoker(opts: {
   publisher: Publisher;
   authorize: WorkflowAuthorizeFn;
   log?: (line: string) => void;
-  onStepDone?: (stepId: string, output: unknown) => void;
+  onStepDone?: (stepID: string, output: unknown) => void;
 }): StepInvoker {
-  const { source, contextRoot, publisher, authorize, log, onStepDone } = opts;
+  const {
+    source,
+    contextRoot,
+    publisher,
+    authorize,
+    log,
+    onStepDone,
+  } = opts;
+  let publishAttempted = false;
 
   return async ({ agent, input, authzContext, signal }) => {
-    const stepId = authzContext.stepId ?? agent.id;
-    await requireStepAuthorization(authorize, stepId, authzContext);
-    if (signal.aborted) throw new Error(`step ${stepId} was cancelled`);
+    const stepID = authzContext.stepId ?? agent.id;
+    try {
+      await requireStepAuthorization(authorize, stepID, authzContext);
+      if (signal.aborted) throw new Error(`step ${stepID} was cancelled`);
 
-    log?.(`step ${stepId}: ${agent.id} running`);
+      log?.(`step ${stepID}: ${agent.id} running`);
 
-    let output: unknown;
-    if (agent.capabilities.length === 0) {
-      output = await runDraftAgent({
-        agent,
-        input,
-        source,
-        contextRoot,
-        authorize,
-        authzContext,
-      });
-    } else if (
-      agent.capabilities.length === 1 &&
-      agent.capabilities[0] === VALIDATE_POST_CAPABILITY
-    ) {
-      output = validateXPost(input);
-    } else if (
-      agent.capabilities.length === 1 &&
-      agent.capabilities[0] === PUBLISH_POST_CAPABILITY
-    ) {
-      if (signal.aborted) throw new Error(`step ${stepId} was cancelled`);
-      const approvedPost = requireApprovedPost(input);
-      output = await publisher.publish(approvedPost.text);
-    } else {
-      throw new Error(`unsupported step capability for ${stepId}`);
+      let output: unknown;
+      if (agent.capabilities.length === 0) {
+        output = await runDraftAgent({
+          agent,
+          input,
+          source,
+          contextRoot,
+          authorize,
+          authzContext,
+        });
+      } else if (
+        agent.capabilities.length === 1 &&
+        agent.capabilities[0] === VALIDATE_POST_CAPABILITY
+      ) {
+        output = validateXPost(input);
+      } else if (
+        agent.capabilities.length === 1 &&
+        agent.capabilities[0] === PUBLISH_POST_CAPABILITY
+      ) {
+        if (signal.aborted) throw new Error(`step ${stepID} was cancelled`);
+        const approvedPost = requireApprovedPost(input);
+        if (publishAttempted) {
+          throw new Error(`step ${stepID} already attempted to publish`);
+        }
+        publishAttempted = true;
+        output = await publisher.publish(approvedPost.text);
+      } else {
+        throw new Error(`unsupported step capability for ${stepID}`);
+      }
+
+      log?.(`step ${stepID}: done`);
+      onStepDone?.(stepID, output);
+      return { output };
+    } catch (error) {
+      log?.(`step ${stepID}: failed: ${errorMessage(error)}`);
+      throw error;
     }
-
-    log?.(`step ${stepId}: done`);
-    onStepDone?.(stepId, output);
-    return { output };
   };
 }
 
 async function requireStepAuthorization(
   authorize: WorkflowAuthorizeFn,
-  stepId: string,
+  stepID: string,
   authzContext: AuthorizeContext,
 ): Promise<void> {
-  const decision = await authorize(`workflow-step:${stepId}`, "invoke", {
+  const decision = await authorize(`workflow-step:${stepID}`, "invoke", {
     ...authzContext,
-    stepId,
+    stepId: stepID,
   });
   if (decision.effect !== "allow") {
     throw new Error(
-      `authorization blocked workflow-step:${stepId} invoke with effect ${decision.effect ?? "null"}`,
+      `authorization blocked workflow-step:${stepID} invoke with effect ${decision.effect ?? "null"}`,
     );
   }
 }
@@ -122,4 +139,8 @@ async function runDraftAgent(opts: {
   } finally {
     await runtimeAgent.close();
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -18,11 +18,11 @@ export const VALIDATE_POST_CAPABILITY = "post-to-x.validate-post";
 export const PUBLISH_POST_CAPABILITY = "post-to-x.publish-post";
 
 function deterministicAgent(
-  id: string,
+  agentID: string,
   capability: string,
 ): AgentDefinition {
   return defineAgent({
-    id,
+    id: agentID,
     description: `Deterministic operation: ${capability}`,
     systemPrompt: "",
     tools: [],
@@ -35,7 +35,9 @@ export function definePostWorkflow(source: Source): WorkflowDefinition {
   const drafter = defineAgent({
     id: "post-drafter",
     systemPrompt:
-      "Write one concise X post. Return only the post text; do not publish it.",
+      "Write one concise X post of at most 240 characters. " +
+      "Return only the post text: no introduction, label, quotes, or markdown. " +
+      "Do not publish it.",
     tools: [],
     capabilities: [],
     inference: { sources: [{ provider: source.provider, model: source.model }] },

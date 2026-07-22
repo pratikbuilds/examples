@@ -32,23 +32,17 @@ import { SERVICE_NAME, type PostToXConfig } from "./config";
 import { createPostStepInvoker } from "./invoke-step";
 import { requireApprovedPost, type ApprovedPost } from "./post";
 import { APPROVAL_SIGNAL, definePostWorkflow } from "./workflow";
-import type { PostReceipt } from "./x-client";
+import { parsePostReceipt, type PostReceipt } from "./x-client";
 
 type PendingPost = {
-  approvalId: string;
+  approvalID: string;
   thread: SlackThreadRef;
   run: WorkflowRun;
-  approvedPost?: ApprovedPost;
   approvalMessageTs?: string;
   decisionClaimed: boolean;
 };
 
 type ApprovalAction = SlackBlockAction & { value: string };
-
-type ActionablePendingPost = PendingPost & {
-  approvedPost: ApprovedPost;
-  approvalMessageTs: string;
-};
 
 export type PostSessions = {
   start: (input: {
@@ -67,7 +61,7 @@ export function createPostSessions(opts: {
 }): PostSessions {
   const { config, stderr } = opts;
   const pendingByThread = new Map<string, PendingPost>();
-  const pendingByApprovalId = new Map<string, PendingPost>();
+  const pendingByApprovalID = new Map<string, PendingPost>();
 
   async function start(input: {
     teamId: string | undefined;
@@ -91,7 +85,6 @@ export function createPostSessions(opts: {
       return;
     }
 
-    const outputs = new Map<string, unknown>();
     const policyReady = deferred<ApprovedPost>();
     const authorize = createSlackAuthorize();
     const invokeStep = createPostStepInvoker({
@@ -100,9 +93,8 @@ export function createPostSessions(opts: {
       publisher: config.publisher,
       authorize,
       log: (line) => stderr(`${SERVICE_NAME}: ${line}\n`),
-      onStepDone: (stepId, output) => {
-        outputs.set(stepId, output);
-        if (stepId === "policy") {
+      onStepDone: (stepID, output) => {
+        if (stepID === "policy") {
           policyReady.resolve(requireApprovedPost(output));
         }
       },
@@ -113,7 +105,7 @@ export function createPostSessions(opts: {
       authorize,
     });
     const pending: PendingPost = {
-      approvalId: randomUUID(),
+      approvalID: randomUUID(),
       thread,
       run,
       decisionClaimed: false,
@@ -121,7 +113,7 @@ export function createPostSessions(opts: {
 
     pendingByThread.set(key, pending);
     void postApprovalWhenReady(pending, policyReady.promise);
-    void postTerminalResult(pending, outputs);
+    void postTerminalResult(pending);
 
     await postMessage(config.botToken, {
       channel: thread.channel,
@@ -132,6 +124,9 @@ export function createPostSessions(opts: {
   }
 
   async function approve(action: ApprovalAction): Promise<void> {
+    if (action.userId === undefined) {
+      throw new Error("Slack approval action is missing its user ID");
+    }
     const pending = claimDecision(action, APPROVE_ACTION_ID);
     if (pending === undefined) {
       await postDecisionUnavailable(action);
@@ -140,7 +135,7 @@ export function createPostSessions(opts: {
 
     try {
       await pending.run.signal(APPROVAL_SIGNAL, {
-        approvedBy: action.userId ?? "slack-user",
+        approvedBy: action.userId,
         approvedAt: new Date().toISOString(),
         channel: pending.thread.channel,
         threadTs: pending.thread.threadTs,
@@ -153,7 +148,10 @@ export function createPostSessions(opts: {
     await postMessage(config.botToken, {
       channel: pending.thread.channel,
       thread_ts: pending.thread.threadTs,
-      text: "Approval recorded. Producing a dry-run receipt now...",
+      text:
+        config.publisher.mode === "live"
+          ? "Approval recorded. Publishing the approved post now..."
+          : "Approval recorded. Producing a dry-run receipt now...",
       blocks: decisionRecordedBlocks("Approval"),
     });
   }
@@ -182,17 +180,16 @@ export function createPostSessions(opts: {
 
   function claimDecision(
     action: ApprovalAction,
-    expectedActionId: string,
-  ): ActionablePendingPost | undefined {
-    const pending = pendingByApprovalId.get(action.value);
+    expectedActionID: string,
+  ): PendingPost | undefined {
+    const pending = pendingByApprovalID.get(action.value);
     if (
       pending === undefined ||
       pending.decisionClaimed ||
-      pending.approvedPost === undefined ||
       pending.approvalMessageTs === undefined ||
-      action.actionId !== expectedActionId ||
-      normalizeTeamId(action.teamId) !==
-        normalizeTeamId(pending.thread.teamId) ||
+      action.actionId !== expectedActionID ||
+      normalizeTeamID(action.teamId) !==
+        normalizeTeamID(pending.thread.teamId) ||
       action.channelId !== pending.thread.channel ||
       action.messageTs !== pending.approvalMessageTs
     ) {
@@ -200,8 +197,8 @@ export function createPostSessions(opts: {
     }
 
     pending.decisionClaimed = true;
-    pendingByApprovalId.delete(pending.approvalId);
-    return pending as ActionablePendingPost;
+    pendingByApprovalID.delete(pending.approvalID);
+    return pending;
   }
 
   async function postApprovalWhenReady(
@@ -215,20 +212,19 @@ export function createPostSessions(opts: {
       ]);
       if (approvedPost === undefined || !ownsThread(pending)) return;
 
-      pending.approvedPost = approvedPost;
       const message = await postMessage(config.botToken, {
         channel: pending.thread.channel,
         thread_ts: pending.thread.threadTs,
         text: truncateForSlack(
           `Post ready for approval:\n\n${approvedPost.text}\n\n` +
-            `${approvedPost.weightedLength}/${approvedPost.limit} weighted characters`,
+            `${approvedPost.length}/${approvedPost.limit} characters`,
         ),
-        blocks: approvalBlocks(approvedPost, pending.approvalId),
+        blocks: approvalBlocks(approvedPost, pending.approvalID),
       });
 
       if (!ownsThread(pending) || pending.decisionClaimed) return;
       pending.approvalMessageTs = message.ts;
-      pendingByApprovalId.set(pending.approvalId, pending);
+      pendingByApprovalID.set(pending.approvalID, pending);
     } catch (error) {
       stderr(`${SERVICE_NAME}: failed to post approval: ${errorMessage(error)}\n`);
       try {
@@ -244,18 +240,13 @@ export function createPostSessions(opts: {
     }
   }
 
-  async function postTerminalResult(
-    pending: PendingPost,
-    outputs: Map<string, unknown>,
-  ): Promise<void> {
+  async function postTerminalResult(pending: PendingPost): Promise<void> {
     try {
       const result = await pending.run.complete;
       cleanup(pending);
 
       if (result.terminalStatus === "completed") {
-        const receipt = requirePostReceipt(
-          result.outputs.publish ?? outputs.get("publish"),
-        );
+        const receipt = parsePostReceipt(result.outputs.publish);
         await postMessage(config.botToken, {
           channel: pending.thread.channel,
           thread_ts: pending.thread.threadTs,
@@ -288,9 +279,9 @@ export function createPostSessions(opts: {
   async function postDecisionUnavailable(action: ApprovalAction): Promise<void> {
     const pending = [...pendingByThread.values()].find(
       (candidate) =>
-        candidate.approvalId === action.value &&
-        normalizeTeamId(action.teamId) ===
-          normalizeTeamId(candidate.thread.teamId) &&
+        candidate.approvalID === action.value &&
+        normalizeTeamID(action.teamId) ===
+          normalizeTeamID(candidate.thread.teamId) &&
         action.channelId === candidate.thread.channel &&
         action.messageTs === candidate.approvalMessageTs,
     );
@@ -328,16 +319,16 @@ export function createPostSessions(opts: {
     if (pendingByThread.get(key) === pending) {
       pendingByThread.delete(key);
     }
-    if (pendingByApprovalId.get(pending.approvalId) === pending) {
-      pendingByApprovalId.delete(pending.approvalId);
+    if (pendingByApprovalID.get(pending.approvalID) === pending) {
+      pendingByApprovalID.delete(pending.approvalID);
     }
   }
 
   return { start, approve, reject };
 }
 
-function normalizeTeamId(teamId: string | undefined): string | undefined {
-  const normalized = teamId?.trim();
+function normalizeTeamID(teamID: string | undefined): string | undefined {
+  const normalized = teamID?.trim();
   return normalized === "" ? undefined : normalized;
 }
 
@@ -363,26 +354,6 @@ function createSlackAuthorize(): WorkflowAuthorizeFn {
       specificity: 100,
     },
   });
-}
-
-function requirePostReceipt(input: unknown): PostReceipt {
-  if (
-    typeof input !== "object" ||
-    input === null ||
-    !("mode" in input) ||
-    (input.mode !== "dry-run" && input.mode !== "live") ||
-    !("postID" in input) ||
-    typeof input.postID !== "string" ||
-    !("text" in input) ||
-    typeof input.text !== "string" ||
-    !("postedAt" in input) ||
-    typeof input.postedAt !== "string" ||
-    (input.mode === "live" &&
-      (!("url" in input) || typeof input.url !== "string" || input.url === ""))
-  ) {
-    throw new Error("publish step did not return a valid receipt");
-  }
-  return input as PostReceipt;
 }
 
 function receiptText(receipt: PostReceipt): string {
