@@ -32,6 +32,7 @@ export function createPostStepInvoker(opts: {
   authorize: WorkflowAuthorizeFn;
   log?: (line: string) => void;
   onStepDone?: (stepID: string, output: unknown) => void;
+  onStepFailed?: (stepID: string, error: unknown) => void;
 }): StepInvoker {
   const {
     source,
@@ -40,6 +41,7 @@ export function createPostStepInvoker(opts: {
     authorize,
     log,
     onStepDone,
+    onStepFailed,
   } = opts;
   return async ({ agent, input, authzContext, signal }) => {
     const stepID = authzContext.stepId ?? agent.id;
@@ -86,6 +88,7 @@ export function createPostStepInvoker(opts: {
       return { output };
     } catch (error) {
       log?.(`step ${stepID}: failed: ${errorMessage(error)}`);
+      onStepFailed?.(stepID, error);
       throw error;
     }
   };

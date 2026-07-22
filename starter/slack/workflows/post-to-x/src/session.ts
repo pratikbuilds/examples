@@ -42,6 +42,7 @@ type PendingPost = {
   run: WorkflowRun;
   approvalMessageTs?: string;
   decisionClaimed: boolean;
+  failureReported: boolean;
 };
 
 type ApprovalAction = SlackBlockAction & { value: string };
@@ -103,6 +104,11 @@ export function createPostSessions(opts: {
           );
         }
       },
+      onStepFailed: (stepID, error) => {
+        if (stepID === "draft" || stepID === "policy") {
+          policyReady.reject(error);
+        }
+      },
     });
     const run = runLocal(definePostWorkflow(config.source), {
       triggerPayload: input.prompt,
@@ -114,6 +120,7 @@ export function createPostSessions(opts: {
       thread,
       run,
       decisionClaimed: false,
+      failureReported: false,
     };
 
     pendingByThread.set(key, pending);
@@ -231,17 +238,26 @@ export function createPostSessions(opts: {
       pending.approvalMessageTs = message.ts;
       pendingByApprovalID.set(pending.approvalID, pending);
     } catch (error) {
-      stderr(`${SERVICE_NAME}: failed to post approval: ${errorMessage(error)}\n`);
+      const message = errorMessage(error);
+      pending.failureReported = true;
+      stderr(`${SERVICE_NAME}: failed before approval: ${message}\n`);
       try {
         await pending.run.cancel(
           "supervisor-operator",
-          "failed to post approval controls",
+          "failed before Slack approval",
         );
       } catch (cancelError) {
         stderr(
           `${SERVICE_NAME}: failed to cancel workflow: ${errorMessage(cancelError)}\n`,
         );
+        cleanup(pending);
       }
+      await postMessage(config.botToken, {
+        channel: pending.thread.channel,
+        thread_ts: pending.thread.threadTs,
+        text: truncateForSlack(`Post-to-X workflow failed: ${message}`),
+        blocks: failedBlocks(message),
+      }).catch(() => undefined);
     }
   }
 
@@ -263,7 +279,7 @@ export function createPostSessions(opts: {
         return;
       }
 
-      if (pending.decisionClaimed) return;
+      if (pending.decisionClaimed || pending.failureReported) return;
       await postMessage(config.botToken, {
         channel: pending.thread.channel,
         thread_ts: pending.thread.threadTs,
@@ -376,12 +392,15 @@ function receiptText(receipt: PostReceipt): string {
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve: (value: T | PromiseLike<T>) => void = () => undefined;
-  const promise = new Promise<T>((innerResolve) => {
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
     resolve = innerResolve;
+    reject = innerReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function errorMessage(error: unknown): string {
