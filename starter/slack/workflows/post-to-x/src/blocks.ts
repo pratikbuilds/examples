@@ -18,7 +18,7 @@ export function startedBlocks(runId: string): SlackBlock[] {
 
 export function approvalBlocks(
   approved: ApprovedPost,
-  runId: string,
+  approvalId: string,
 ): SlackBlock[] {
   return [
     header("Post ready for approval"),
@@ -29,20 +29,30 @@ export function approvalBlocks(
         text: "Approve",
         style: "primary",
         actionId: APPROVE_ACTION_ID,
-        value: runId,
+        value: approvalId,
       }),
       button({
         text: "Reject",
         style: "danger",
         actionId: REJECT_ACTION_ID,
-        value: runId,
+        value: approvalId,
       }),
     ]),
   ];
 }
 
-export function approvedBlocks(): SlackBlock[] {
-  return statusBlocks("Approved", "Publishing the exact approved text now.");
+export function alreadyRunningBlocks(): SlackBlock[] {
+  return statusBlocks(
+    "Workflow already running",
+    "Use the approval card already posted in this thread.",
+  );
+}
+
+export function decisionRecordedBlocks(decision: string): SlackBlock[] {
+  return statusBlocks(
+    `${decision} recorded`,
+    "This approval card cannot be used again.",
+  );
 }
 
 export function rejectedBlocks(): SlackBlock[] {
@@ -63,13 +73,6 @@ export function failedBlocks(message: string): SlackBlock[] {
 
 export function terminalStatusBlocks(status: string): SlackBlock[] {
   return statusBlocks("Workflow ended", `Status: \`${status}\``);
-}
-
-export function notReadyBlocks(): SlackBlock[] {
-  return statusBlocks(
-    "Not waiting yet",
-    "The validated post will appear before approval is available.",
-  );
 }
 
 function statusBlocks(title: string, text: string): SlackBlock[] {

@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import {
-  createSlackThreadSessionStore,
   postMessage,
   safePathSegment,
   slackThreadKey,
   truncateForSlack,
+  type SlackBlockAction,
   type SlackThreadRef,
   type Write,
 } from "@corbits/example-slack-bridge";
@@ -17,11 +17,13 @@ import {
 } from "@intx/workflow";
 
 import {
-  approvedBlocks,
+  APPROVE_ACTION_ID,
+  REJECT_ACTION_ID,
+  alreadyRunningBlocks,
   approvalBlocks,
+  decisionRecordedBlocks,
   dryRunReceiptBlocks,
   failedBlocks,
-  notReadyBlocks,
   rejectedBlocks,
   startedBlocks,
   terminalStatusBlocks,
@@ -33,11 +35,19 @@ import { APPROVAL_SIGNAL, definePostWorkflow } from "./workflow";
 import type { PostReceipt } from "./x-client";
 
 type PendingPost = {
-  key: string;
+  approvalId: string;
   thread: SlackThreadRef;
   run: WorkflowRun;
-  status: "drafting" | "awaiting-approval" | "resuming" | "finished";
-  decision?: "approved" | "rejected";
+  approvedPost?: ApprovedPost;
+  approvalMessageTs?: string;
+  decisionClaimed: boolean;
+};
+
+type ApprovalAction = SlackBlockAction & { value: string };
+
+type ActionablePendingPost = PendingPost & {
+  approvedPost: ApprovedPost;
+  approvalMessageTs: string;
 };
 
 export type PostSessions = {
@@ -47,8 +57,8 @@ export type PostSessions = {
     threadTs: string;
     prompt: string;
   }) => Promise<void>;
-  approve: (runId: string, userId: string | undefined) => Promise<void>;
-  reject: (runId: string) => Promise<void>;
+  approve: (action: ApprovalAction) => Promise<void>;
+  reject: (action: ApprovalAction) => Promise<void>;
 };
 
 export function createPostSessions(opts: {
@@ -56,10 +66,8 @@ export function createPostSessions(opts: {
   stderr: Write;
 }): PostSessions {
   const { config, stderr } = opts;
-  const pendingByThread = createSlackThreadSessionStore<PendingPost>(
-    (pending) => pending.status !== "finished",
-  );
-  const pendingByRunId = new Map<string, PendingPost>();
+  const pendingByThread = new Map<string, PendingPost>();
+  const pendingByApprovalId = new Map<string, PendingPost>();
 
   async function start(input: {
     teamId: string | undefined;
@@ -73,7 +81,15 @@ export function createPostSessions(opts: {
       threadTs: input.threadTs,
     };
     const key = slackThreadKey(thread);
-    if (pendingByThread.getActive(key) !== undefined) return;
+    if (pendingByThread.has(key)) {
+      await postMessage(config.botToken, {
+        channel: thread.channel,
+        thread_ts: thread.threadTs,
+        text: "A post-to-X workflow is already running in this thread.",
+        blocks: alreadyRunningBlocks(),
+      });
+      return;
+    }
 
     const outputs = new Map<string, unknown>();
     const policyReady = deferred<ApprovedPost>();
@@ -97,14 +113,13 @@ export function createPostSessions(opts: {
       authorize,
     });
     const pending: PendingPost = {
-      key,
+      approvalId: randomUUID(),
       thread,
       run,
-      status: "drafting",
+      decisionClaimed: false,
     };
 
     pendingByThread.set(key, pending);
-    pendingByRunId.set(run.runId, pending);
     void postApprovalWhenReady(pending, policyReady.promise);
     void postTerminalResult(pending, outputs);
 
@@ -116,64 +131,77 @@ export function createPostSessions(opts: {
     });
   }
 
-  async function approve(
-    runId: string,
-    userId: string | undefined,
-  ): Promise<void> {
-    const pending = pendingByRunId.get(runId);
-    if (pending === undefined || pending.status === "finished") return;
-    if (pending.status !== "awaiting-approval") {
-      await postNotReady(pending);
+  async function approve(action: ApprovalAction): Promise<void> {
+    const pending = claimDecision(action, APPROVE_ACTION_ID);
+    if (pending === undefined) {
+      await postDecisionUnavailable(action);
       return;
     }
 
-    pending.status = "resuming";
-    pending.decision = "approved";
     try {
       await pending.run.signal(APPROVAL_SIGNAL, {
-        approvedBy: userId ?? "slack-user",
+        approvedBy: action.userId ?? "slack-user",
         approvedAt: new Date().toISOString(),
         channel: pending.thread.channel,
         threadTs: pending.thread.threadTs,
       });
     } catch (error) {
-      pending.status = "awaiting-approval";
-      pending.decision = undefined;
+      await surfaceDecisionFailure(pending, "Approval", error);
       throw error;
     }
 
     await postMessage(config.botToken, {
       channel: pending.thread.channel,
       thread_ts: pending.thread.threadTs,
-      text: "Approved. Producing a dry-run receipt now...",
-      blocks: approvedBlocks(),
+      text: "Approval recorded. Producing a dry-run receipt now...",
+      blocks: decisionRecordedBlocks("Approval"),
     });
   }
 
-  async function reject(runId: string): Promise<void> {
-    const pending = pendingByRunId.get(runId);
-    if (pending === undefined || pending.status === "finished") return;
-    if (pending.status !== "awaiting-approval") {
-      await postNotReady(pending);
+  async function reject(action: ApprovalAction): Promise<void> {
+    const pending = claimDecision(action, REJECT_ACTION_ID);
+    if (pending === undefined) {
+      await postDecisionUnavailable(action);
       return;
     }
 
-    pending.status = "resuming";
-    pending.decision = "rejected";
     try {
       await pending.run.cancel("supervisor-operator", "rejected from Slack");
     } catch (error) {
-      pending.status = "awaiting-approval";
-      pending.decision = undefined;
+      await surfaceDecisionFailure(pending, "Rejection", error);
       throw error;
     }
 
     await postMessage(config.botToken, {
       channel: pending.thread.channel,
       thread_ts: pending.thread.threadTs,
-      text: "Rejected. Workflow cancelled; nothing was posted.",
+      text: "Rejection recorded. Workflow cancelled; nothing was posted.",
       blocks: rejectedBlocks(),
     });
+  }
+
+  function claimDecision(
+    action: ApprovalAction,
+    expectedActionId: string,
+  ): ActionablePendingPost | undefined {
+    const pending = pendingByApprovalId.get(action.value);
+    if (
+      pending === undefined ||
+      pending.decisionClaimed ||
+      pending.approvedPost === undefined ||
+      pending.approvalMessageTs === undefined ||
+      action.actionId !== expectedActionId ||
+      normalizeTeamId(action.teamId) !==
+        normalizeTeamId(pending.thread.teamId) ||
+      action.channelId !== pending.thread.channel ||
+      action.messageTs !== pending.approvalMessageTs
+    ) {
+      return undefined;
+    }
+
+    pending.decisionClaimed = true;
+    pendingByApprovalId.delete(pending.approvalId);
+    return pending as ActionablePendingPost;
   }
 
   async function postApprovalWhenReady(
@@ -181,22 +209,26 @@ export function createPostSessions(opts: {
     policyReady: Promise<ApprovedPost>,
   ): Promise<void> {
     try {
-      const approved = await Promise.race([
+      const approvedPost = await Promise.race([
         policyReady,
         pending.run.complete.then(() => undefined),
       ]);
-      if (approved === undefined || pending.status !== "drafting") return;
+      if (approvedPost === undefined || !ownsThread(pending)) return;
 
-      await postMessage(config.botToken, {
+      pending.approvedPost = approvedPost;
+      const message = await postMessage(config.botToken, {
         channel: pending.thread.channel,
         thread_ts: pending.thread.threadTs,
         text: truncateForSlack(
-          `Post ready for approval:\n\n${approved.text}\n\n` +
-            `${approved.weightedLength}/${approved.limit} weighted characters`,
+          `Post ready for approval:\n\n${approvedPost.text}\n\n` +
+            `${approvedPost.weightedLength}/${approvedPost.limit} weighted characters`,
         ),
-        blocks: approvalBlocks(approved, pending.run.runId),
+        blocks: approvalBlocks(approvedPost, pending.approvalId),
       });
-      pending.status = "awaiting-approval";
+
+      if (!ownsThread(pending) || pending.decisionClaimed) return;
+      pending.approvalMessageTs = message.ts;
+      pendingByApprovalId.set(pending.approvalId, pending);
     } catch (error) {
       stderr(`${SERVICE_NAME}: failed to post approval: ${errorMessage(error)}\n`);
       try {
@@ -218,7 +250,7 @@ export function createPostSessions(opts: {
   ): Promise<void> {
     try {
       const result = await pending.run.complete;
-      finish(pending);
+      cleanup(pending);
 
       if (result.terminalStatus === "completed") {
         const receipt = requirePostReceipt(
@@ -236,7 +268,7 @@ export function createPostSessions(opts: {
         return;
       }
 
-      if (pending.decision === "rejected") return;
+      if (pending.decisionClaimed) return;
       await postMessage(config.botToken, {
         channel: pending.thread.channel,
         thread_ts: pending.thread.threadTs,
@@ -244,7 +276,7 @@ export function createPostSessions(opts: {
         blocks: terminalStatusBlocks(result.terminalStatus),
       });
     } catch (error) {
-      finish(pending);
+      cleanup(pending);
       const message = errorMessage(error);
       stderr(`${SERVICE_NAME}: workflow failed: ${message}\n`);
       await postMessage(config.botToken, {
@@ -256,22 +288,60 @@ export function createPostSessions(opts: {
     }
   }
 
-  function finish(pending: PendingPost): void {
-    pending.status = "finished";
-    pendingByThread.delete(pending.key);
-    pendingByRunId.delete(pending.run.runId);
-  }
+  async function postDecisionUnavailable(action: ApprovalAction): Promise<void> {
+    const pending = [...pendingByThread.values()].find(
+      (candidate) =>
+        candidate.approvalId === action.value &&
+        normalizeTeamId(action.teamId) ===
+          normalizeTeamId(candidate.thread.teamId) &&
+        action.channelId === candidate.thread.channel &&
+        action.messageTs === candidate.approvalMessageTs,
+    );
+    if (pending === undefined) return;
 
-  async function postNotReady(pending: PendingPost): Promise<void> {
     await postMessage(config.botToken, {
       channel: pending.thread.channel,
       thread_ts: pending.thread.threadTs,
-      text: "The workflow is not waiting for approval yet.",
-      blocks: notReadyBlocks(),
+      text: "A decision was already recorded for this approval.",
+      blocks: decisionRecordedBlocks("Decision already"),
     });
   }
 
+  async function surfaceDecisionFailure(
+    pending: PendingPost,
+    decision: string,
+    error: unknown,
+  ): Promise<void> {
+    const message = `${decision} failed: ${errorMessage(error)}`;
+    stderr(`${SERVICE_NAME}: ${message}\n`);
+    await postMessage(config.botToken, {
+      channel: pending.thread.channel,
+      thread_ts: pending.thread.threadTs,
+      text: truncateForSlack(message),
+      blocks: failedBlocks(message),
+    }).catch(() => undefined);
+  }
+
+  function ownsThread(pending: PendingPost): boolean {
+    return pendingByThread.get(slackThreadKey(pending.thread)) === pending;
+  }
+
+  function cleanup(pending: PendingPost): void {
+    const key = slackThreadKey(pending.thread);
+    if (pendingByThread.get(key) === pending) {
+      pendingByThread.delete(key);
+    }
+    if (pendingByApprovalId.get(pending.approvalId) === pending) {
+      pendingByApprovalId.delete(pending.approvalId);
+    }
+  }
+
   return { start, approve, reject };
+}
+
+function normalizeTeamId(teamId: string | undefined): string | undefined {
+  const normalized = teamId?.trim();
+  return normalized === "" ? undefined : normalized;
 }
 
 function createSlackAuthorize(): WorkflowAuthorizeFn {

@@ -23,9 +23,8 @@ export function createPostWorkflowAdapter(opts: {
       event.subtype === undefined,
     onStart: sessions.start,
     actionHandlers: {
-      [APPROVE_ACTION_ID]: (action) =>
-        sessions.approve(action.value, action.userId),
-      [REJECT_ACTION_ID]: (action) => sessions.reject(action.value),
+      [APPROVE_ACTION_ID]: (action) => sessions.approve(action),
+      [REJECT_ACTION_ID]: (action) => sessions.reject(action),
     },
   });
 }
