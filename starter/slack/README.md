@@ -25,6 +25,13 @@ cd starter/slack/workflows/approval-flow
 cp .env.example .env
 ```
 
+or:
+
+```bash
+cd starter/slack/workflows/post-to-x
+cp .env.example .env
+```
+
 Fill in:
 
 ```bash
@@ -51,6 +58,7 @@ Event Subscriptions, Slash Commands, and Interactivity at
 | --- | --- | --- |
 | Agent | `starter/slack/agent` | `@interchange explain this channel` |
 | Approval workflow | `starter/slack/workflows/approval-flow` | `@interchange-workflow write a launch note` |
+| Post to X | `starter/slack/workflows/post-to-x` | `@interchange-social write a launch post` |
 
 ## Workflow Shape
 
@@ -63,6 +71,11 @@ Slack message -> draft -> approval buttons -> approve/reject -> final reply
 Approve sends a workflow signal. Reject cancels the run. The final result is
 posted back into the same Slack thread.
 
+The post-to-X workflow follows `draft -> policy -> approval -> publish`.
+Its Phase 1 publisher is always a dry run, so approval returns a receipt without
+creating a public X post. See
+[`workflows/post-to-x/README.md`](workflows/post-to-x/README.md) for setup.
+
 ## Where Things Live
 
 | Path | Purpose |
@@ -70,6 +83,7 @@ posted back into the same Slack thread.
 | `bridge/` | Shared Slack plumbing |
 | `agent/` | Direct Slack agent example |
 | `workflows/approval-flow/` | Slack approval workflow example |
+| `workflows/post-to-x/` | App-mention-to-X dry-run workflow example |
 
 ## Providers
 
