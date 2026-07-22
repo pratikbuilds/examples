@@ -10,7 +10,7 @@ import {
 } from "@corbits/example-slack-bridge";
 
 import { kind } from "./workflow";
-import { createDryRunPublisher, type Publisher } from "./x-client";
+import { createPublisher, type Publisher } from "./x-client";
 
 export const SERVICE_NAME = kind;
 
@@ -39,7 +39,7 @@ export function resolveConfig(
       ...slack.config,
       source: model.source,
       contextRoot: contextRootOverride ?? join(process.cwd(), "tmp", kind),
-      publisher: createDryRunPublisher(),
+      publisher: createPublisher(env),
     },
   };
 }

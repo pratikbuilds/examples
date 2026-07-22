@@ -22,8 +22,8 @@ import {
   alreadyRunningBlocks,
   approvalBlocks,
   decisionRecordedBlocks,
-  dryRunReceiptBlocks,
   failedBlocks,
+  receiptBlocks,
   rejectedBlocks,
   startedBlocks,
   terminalStatusBlocks,
@@ -259,11 +259,8 @@ export function createPostSessions(opts: {
         await postMessage(config.botToken, {
           channel: pending.thread.channel,
           thread_ts: pending.thread.threadTs,
-          text: truncateForSlack(
-            `Dry-run complete. No X post was created.\n\n${receipt.text}\n\n` +
-              `Receipt: ${receipt.postId}`,
-          ),
-          blocks: dryRunReceiptBlocks(receipt),
+          text: truncateForSlack(receiptText(receipt)),
+          blocks: receiptBlocks(receipt),
         });
         return;
       }
@@ -373,17 +370,29 @@ function requirePostReceipt(input: unknown): PostReceipt {
     typeof input !== "object" ||
     input === null ||
     !("mode" in input) ||
-    input.mode !== "dry-run" ||
-    !("postId" in input) ||
-    typeof input.postId !== "string" ||
+    (input.mode !== "dry-run" && input.mode !== "live") ||
+    !("postID" in input) ||
+    typeof input.postID !== "string" ||
     !("text" in input) ||
     typeof input.text !== "string" ||
     !("postedAt" in input) ||
-    typeof input.postedAt !== "string"
+    typeof input.postedAt !== "string" ||
+    (input.mode === "live" &&
+      (!("url" in input) || typeof input.url !== "string" || input.url === ""))
   ) {
-    throw new Error("publish step did not return a dry-run receipt");
+    throw new Error("publish step did not return a valid receipt");
   }
   return input as PostReceipt;
+}
+
+function receiptText(receipt: PostReceipt): string {
+  if (receipt.mode === "live") {
+    return `Posted to X: ${receipt.url}\n\n${receipt.text}`;
+  }
+  return (
+    `Dry-run complete. No X post was created.\n\n${receipt.text}\n\n` +
+    `Receipt: ${receipt.postID}`
+  );
 }
 
 function deferred<T>(): {

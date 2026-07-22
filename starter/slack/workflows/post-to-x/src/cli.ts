@@ -24,7 +24,7 @@ export async function main(
       [
         "usage: bun run start",
         "",
-        "Start the Slack post-to-X dry-run workflow.",
+        "Start the Slack post-to-X workflow.",
         "",
       ].join("\n"),
     );
@@ -37,7 +37,9 @@ export async function main(
     return 1;
   }
 
-  stdout(`${SERVICE_NAME}: policy-limit=280 publisher=dry-run\n`);
+  stderr(
+    `${SERVICE_NAME}: publisher=${resolved.config.publisher.mode}, limit=280\n`,
+  );
   const adapter = createPostWorkflowAdapter({
     config: resolved.config,
     stderr,

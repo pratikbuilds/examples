@@ -72,9 +72,9 @@ Approve sends a workflow signal. Reject cancels the run. The final result is
 posted back into the same Slack thread.
 
 The post-to-X workflow follows `draft -> policy -> approval -> publish`.
-Its Phase 1 publisher is always a dry run, so approval returns a receipt without
-creating a public X post. See
-[`workflows/post-to-x/README.md`](workflows/post-to-x/README.md) for setup.
+Dry-run is the default. Live mode requires explicit `X_LIVE=1`, four complete X
+OAuth 1.0a credentials, and an X app with read/write permission. See the
+[`post-to-X setup and runbook`](workflows/post-to-x/README.md).
 
 ## Where Things Live
 
@@ -83,7 +83,7 @@ creating a public X post. See
 | `bridge/` | Shared Slack plumbing |
 | `agent/` | Direct Slack agent example |
 | `workflows/approval-flow/` | Slack approval workflow example |
-| `workflows/post-to-x/` | App-mention-to-X dry-run workflow example |
+| `workflows/post-to-x/` | Approval-gated post-to-X workflow example |
 
 ## Providers
 

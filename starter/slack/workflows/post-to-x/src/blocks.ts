@@ -59,11 +59,23 @@ export function rejectedBlocks(): SlackBlock[] {
   return statusBlocks("Rejected", "Workflow cancelled. Nothing was posted.");
 }
 
-export function dryRunReceiptBlocks(receipt: PostReceipt): SlackBlock[] {
+export function receiptBlocks(receipt: PostReceipt): SlackBlock[] {
+  if (receipt.mode === "live") {
+    if (receipt.url === undefined) {
+      throw new Error("live X receipt is missing its URL");
+    }
+    return [
+      header("Posted to X"),
+      section(`<${receipt.url}|View post>`),
+      section(truncateBlockText(receipt.text)),
+    ];
+  }
+
   return [
-    header("Dry-run complete"),
+    header("Dry run complete"),
+    section("No X post was created."),
     section(truncateBlockText(receipt.text)),
-    section(`No X post was created. Receipt: \`${receipt.postId}\``),
+    section(`Synthetic receipt: \`${receipt.postID}\``),
   ];
 }
 

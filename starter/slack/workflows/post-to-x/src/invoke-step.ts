@@ -61,7 +61,8 @@ export function createPostStepInvoker(opts: {
       agent.capabilities[0] === PUBLISH_POST_CAPABILITY
     ) {
       if (signal.aborted) throw new Error(`step ${stepId} was cancelled`);
-      output = await publisher.publish(requireApprovedPost(input).text);
+      const approvedPost = requireApprovedPost(input);
+      output = await publisher.publish(approvedPost.text);
     } else {
       throw new Error(`unsupported step capability for ${stepId}`);
     }
