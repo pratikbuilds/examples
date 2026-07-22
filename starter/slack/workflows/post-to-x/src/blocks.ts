@@ -6,7 +6,7 @@ import {
   type SlackBlock,
 } from "@corbits/example-slack-bridge";
 
-import type { ApprovedPost } from "./post";
+import { X_POST_LIMIT, type ApprovedPost } from "./post";
 import type { PostReceipt } from "./x-client";
 
 export const APPROVE_ACTION_ID = "post-to-x.approve";
@@ -23,7 +23,7 @@ export function approvalBlocks(
   return [
     header("Post ready for approval"),
     section(truncateBlockText(approved.text)),
-    section(`${approved.length}/${approved.limit} characters`),
+    section(`${approved.length}/${String(X_POST_LIMIT)} characters`),
     actions([
       button({
         text: "Approve",

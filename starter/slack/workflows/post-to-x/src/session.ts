@@ -29,9 +29,12 @@ import {
   terminalStatusBlocks,
 } from "./blocks";
 import { SERVICE_NAME, type PostToXConfig } from "./config";
-import { requireDeterministicToolContent } from "./deterministic-tool-step";
 import { createPostStepInvoker } from "./invoke-step";
-import { requireApprovedPost, type ApprovedPost } from "./post";
+import {
+  requireApprovedPost,
+  X_POST_LIMIT,
+  type ApprovedPost,
+} from "./post";
 import { createPostToolRunner } from "./post-tools";
 import { APPROVAL_SIGNAL, definePostWorkflow } from "./workflow";
 import { parsePostReceipt, type PostReceipt } from "./x-client";
@@ -47,21 +50,10 @@ type PendingPost = {
 
 type ApprovalAction = SlackBlockAction & { value: string };
 
-export type PostSessions = {
-  start: (input: {
-    teamId: string | undefined;
-    channel: string;
-    threadTs: string;
-    prompt: string;
-  }) => Promise<void>;
-  approve: (action: ApprovalAction) => Promise<void>;
-  reject: (action: ApprovalAction) => Promise<void>;
-};
-
 export function createPostSessions(opts: {
   config: PostToXConfig;
   stderr: Write;
-}): PostSessions {
+}) {
   const { config, stderr } = opts;
   const pendingByThread = new Map<string, PendingPost>();
   const pendingByApprovalID = new Map<string, PendingPost>();
@@ -99,9 +91,7 @@ export function createPostSessions(opts: {
       log: (line) => stderr(`${SERVICE_NAME}: ${line}\n`),
       onStepDone: (stepID, output) => {
         if (stepID === "policy") {
-          policyReady.resolve(
-            requireApprovedPost(requireDeterministicToolContent(output)),
-          );
+          policyReady.resolve(requireApprovedPost(output));
         }
       },
       onStepFailed: (stepID, error) => {
@@ -229,7 +219,7 @@ export function createPostSessions(opts: {
         thread_ts: pending.thread.threadTs,
         text: truncateForSlack(
           `Post ready for approval:\n\n${approvedPost.text}\n\n` +
-            `${approvedPost.length}/${approvedPost.limit} characters`,
+            `${approvedPost.length}/${String(X_POST_LIMIT)} characters`,
         ),
         blocks: approvalBlocks(approvedPost, pending.approvalID),
       });
@@ -267,9 +257,7 @@ export function createPostSessions(opts: {
       cleanup(pending);
 
       if (result.terminalStatus === "completed") {
-        const receipt = parsePostReceipt(
-          requireDeterministicToolContent(result.outputs.publish),
-        );
+        const receipt = parsePostReceipt(result.outputs.publish);
         await postMessage(config.botToken, {
           channel: pending.thread.channel,
           thread_ts: pending.thread.threadTs,

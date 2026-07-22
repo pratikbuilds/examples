@@ -1,11 +1,11 @@
 import { type } from "arktype";
 
 const DraftInput = type("string").or({ text: "string" });
+export const X_POST_LIMIT = 280;
 
 const ApprovedPost = type({
   text: "string",
   length: "number",
-  limit: "280",
 });
 
 export type ApprovedPost = typeof ApprovedPost.infer;
@@ -24,15 +24,13 @@ export function validateXPost(input: unknown): ApprovedPost {
   }
 
   const length = Array.from(text).length;
-  if (length > 280) {
-    throw new Error(`draft is too long for X (${length}/280 characters)`);
+  if (length > X_POST_LIMIT) {
+    throw new Error(
+      `draft is too long for X (${length}/${String(X_POST_LIMIT)} characters)`,
+    );
   }
 
-  return Object.freeze({
-    text,
-    length,
-    limit: 280,
-  });
+  return Object.freeze({ text, length });
 }
 
 export function requireApprovedPost(input: unknown): ApprovedPost {

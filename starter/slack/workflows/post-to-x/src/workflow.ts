@@ -48,7 +48,7 @@ export function definePostWorkflow(source: Source): WorkflowDefinition {
         id: "post-publisher",
         tool: PUBLISH_POST_TOOL,
         after: ["approval"],
-        input: { from: "steps.policy.output.content" },
+        input: { from: "steps.policy.output" },
       }),
     },
   });

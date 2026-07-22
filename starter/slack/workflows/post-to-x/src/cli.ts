@@ -1,7 +1,12 @@
-import { startSlackBridge } from "@corbits/example-slack-bridge";
+import {
+  createSlackWorkflowAdapter,
+  startSlackBridge,
+} from "@corbits/example-slack-bridge";
 
-import { createPostWorkflowAdapter } from "./adapter";
+import { APPROVE_ACTION_ID, REJECT_ACTION_ID } from "./blocks";
 import { resolveConfig, SERVICE_NAME } from "./config";
+import { X_POST_LIMIT } from "./post";
+import { createPostSessions } from "./session";
 
 export type MainOptions = {
   stdout?: (text: string) => void;
@@ -38,11 +43,22 @@ export async function main(
   }
 
   stderr(
-    `${SERVICE_NAME}: publisher=${resolved.config.publisher.mode}, limit=280\n`,
+    `${SERVICE_NAME}: publisher=${resolved.config.publisher.mode}, limit=${String(X_POST_LIMIT)}\n`,
   );
-  const adapter = createPostWorkflowAdapter({
+  const sessions = createPostSessions({
     config: resolved.config,
     stderr,
+  });
+  const adapter = createSlackWorkflowAdapter({
+    shouldStartEvent: (event) =>
+      event.type === "app_mention" &&
+      event.bot_id === undefined &&
+      event.subtype === undefined,
+    onStart: sessions.start,
+    actionHandlers: {
+      [APPROVE_ACTION_ID]: sessions.approve,
+      [REJECT_ACTION_ID]: sessions.reject,
+    },
   });
 
   try {

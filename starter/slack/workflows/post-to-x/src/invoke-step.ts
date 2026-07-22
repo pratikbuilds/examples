@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -18,12 +17,7 @@ import {
 
 import type { Source } from "@corbits/example-slack-agent";
 
-import {
-  DETERMINISTIC_TOOL_KIND,
-  runDeterministicToolStep,
-  STEP_KIND_TAG,
-  STEP_TOOL_TAG,
-} from "./deterministic-tool-step";
+import { runDeterministicToolStep } from "./deterministic-tool-step";
 
 export function createPostStepInvoker(opts: {
   source: Source;
@@ -52,17 +46,8 @@ export function createPostStepInvoker(opts: {
       log?.(`step ${stepID}: ${agent.id} running`);
 
       let output: unknown;
-      const toolName = agent.tags?.[STEP_TOOL_TAG];
-      if (
-        agent.tags?.[STEP_KIND_TAG] === DETERMINISTIC_TOOL_KIND &&
-        toolName !== undefined
-      ) {
-        if (
-          agent.capabilities.length !== 1 ||
-          agent.capabilities[0] !== toolName
-        ) {
-          throw new Error(`deterministic step ${stepID} has invalid capabilities`);
-        }
+      const [toolName] = agent.capabilities;
+      if (toolName !== undefined && agent.capabilities.length === 1) {
         output = await runDeterministicToolStep({
           runner: toolRunner,
           stepId: stepID,
@@ -119,7 +104,6 @@ async function runDraftAgent(opts: {
   authzContext: AuthorizeContext;
 }): Promise<string> {
   const workdir = join(opts.contextRoot, opts.authzContext.stepId ?? opts.agent.id);
-  mkdirSync(workdir, { recursive: true });
   const storage = await createIsogitStore(workdir);
   const authorize: BaseEnv["authorize"] = (resource, action) =>
     opts.authorize(resource, action, opts.authzContext);

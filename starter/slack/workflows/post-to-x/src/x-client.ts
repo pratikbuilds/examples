@@ -21,13 +21,11 @@ const PostReceipt = type({
   mode: "'dry-run'",
   postID: "string > 0",
   text: "string",
-  postedAt: "string",
 }).or({
   mode: "'live'",
   postID: "string > 0",
   url: "string > 0",
   text: "string",
-  postedAt: "string",
 });
 
 type XCredentials = typeof XCredentials.infer;
@@ -53,7 +51,6 @@ export function createPublisher(env: NodeJS.ProcessEnv): Publisher {
         postID,
         url: `https://x.com/i/web/status/${postID}`,
         text,
-        postedAt: new Date().toISOString(),
       });
     },
   };
@@ -67,7 +64,6 @@ export function createDryRunPublisher(): Publisher {
         mode: "dry-run",
         postID: `dryrun-${randomUUID()}`,
         text,
-        postedAt: new Date().toISOString(),
       });
     },
   };
