@@ -143,6 +143,7 @@ export function createPostSessions(opts: {
         threadTs: pending.thread.threadTs,
       });
     } catch (error) {
+      cleanup(pending);
       await surfaceDecisionFailure(pending, "Approval", error);
       throw error;
     }
@@ -159,6 +160,9 @@ export function createPostSessions(opts: {
   }
 
   async function reject(action: ApprovalAction): Promise<void> {
+    if (action.userId === undefined) {
+      throw new Error("Slack rejection action is missing its user ID");
+    }
     const pending = claimDecision(action, REJECT_ACTION_ID);
     if (pending === undefined) {
       await postDecisionUnavailable(action);
@@ -166,8 +170,12 @@ export function createPostSessions(opts: {
     }
 
     try {
-      await pending.run.cancel("supervisor-operator", "rejected from Slack");
+      await pending.run.cancel(
+        "supervisor-operator",
+        `rejected from Slack by ${action.userId}`,
+      );
     } catch (error) {
+      cleanup(pending);
       await surfaceDecisionFailure(pending, "Rejection", error);
       throw error;
     }
