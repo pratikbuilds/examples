@@ -29,8 +29,10 @@ import {
   terminalStatusBlocks,
 } from "./blocks";
 import { SERVICE_NAME, type PostToXConfig } from "./config";
+import { requireDeterministicToolContent } from "./deterministic-tool-step";
 import { createPostStepInvoker } from "./invoke-step";
 import { requireApprovedPost, type ApprovedPost } from "./post";
+import { createPostToolRunner } from "./post-tools";
 import { APPROVAL_SIGNAL, definePostWorkflow } from "./workflow";
 import { parsePostReceipt, type PostReceipt } from "./x-client";
 
@@ -87,15 +89,18 @@ export function createPostSessions(opts: {
 
     const policyReady = deferred<ApprovedPost>();
     const authorize = createSlackAuthorize();
+    const toolRunner = createPostToolRunner(config.publisher);
     const invokeStep = createPostStepInvoker({
       source: config.source,
       contextRoot: join(config.contextRoot, safePathSegment(randomUUID())),
-      publisher: config.publisher,
+      toolRunner,
       authorize,
       log: (line) => stderr(`${SERVICE_NAME}: ${line}\n`),
       onStepDone: (stepID, output) => {
         if (stepID === "policy") {
-          policyReady.resolve(requireApprovedPost(output));
+          policyReady.resolve(
+            requireApprovedPost(requireDeterministicToolContent(output)),
+          );
         }
       },
     });
@@ -246,7 +251,9 @@ export function createPostSessions(opts: {
       cleanup(pending);
 
       if (result.terminalStatus === "completed") {
-        const receipt = parsePostReceipt(result.outputs.publish);
+        const receipt = parsePostReceipt(
+          requireDeterministicToolContent(result.outputs.publish),
+        );
         await postMessage(config.botToken, {
           channel: pending.thread.channel,
           thread_ts: pending.thread.threadTs,

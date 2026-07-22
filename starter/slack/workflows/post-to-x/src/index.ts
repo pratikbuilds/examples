@@ -5,14 +5,13 @@ export {
 } from "./post";
 export {
   APPROVAL_SIGNAL,
-  PUBLISH_POST_CAPABILITY,
-  VALIDATE_POST_CAPABILITY,
   WORKFLOW_ID,
   definePostWorkflow,
   description,
   kind,
   label,
 } from "./workflow";
+export { PUBLISH_POST_TOOL, VALIDATE_POST_TOOL } from "./post-tools";
 export {
   createDryRunPublisher,
   type PostReceipt,

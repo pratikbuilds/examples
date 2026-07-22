@@ -17,6 +17,10 @@ draft -> policy -> approval -> publish
   publisher. It does not run another model turn or accept replacement Slack
   text.
 
+The policy and publish stages declare real tool names. A generic local tool
+runner dispatches those steps without inference; the workflow does not branch
+on post-to-X-specific capability labels.
+
 Slack only transports the mention, approval action, and terminal response. The
 workflow definition contains no Slack data, credentials, or publisher
 functions.

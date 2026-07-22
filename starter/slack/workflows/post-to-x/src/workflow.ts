@@ -1,4 +1,4 @@
-import { defineAgent, type AgentDefinition } from "@intx/agent";
+import { defineAgent } from "@intx/agent";
 import {
   awaitSignal,
   defineWorkflow,
@@ -8,36 +8,22 @@ import {
 
 import type { Source } from "@corbits/example-slack-agent";
 
+import { deterministicToolStep } from "./deterministic-tool-step";
+import { PUBLISH_POST_TOOL, VALIDATE_POST_TOOL } from "./post-tools";
+
 export const kind = "slack-post-to-x";
 export const label = "Post to X";
 export const description =
   "Draft, validate, approve, and publish an X post from Slack.";
 export const WORKFLOW_ID = kind;
 export const APPROVAL_SIGNAL = "approve";
-export const VALIDATE_POST_CAPABILITY = "post-to-x.validate-post";
-export const PUBLISH_POST_CAPABILITY = "post-to-x.publish-post";
-
-function deterministicAgent(
-  agentID: string,
-  capability: string,
-): AgentDefinition {
-  return defineAgent({
-    id: agentID,
-    description: `Deterministic operation: ${capability}`,
-    systemPrompt: "",
-    tools: [],
-    capabilities: [capability],
-    inference: { sources: [] },
-  });
-}
 
 export function definePostWorkflow(source: Source): WorkflowDefinition {
   const drafter = defineAgent({
     id: "post-drafter",
     systemPrompt:
       "Write one concise X post of at most 240 characters. " +
-      "Return only the post text: no introduction, label, quotes, or markdown. " +
-      "Do not publish it.",
+      "Return only the post text: no introduction, label, quotes, or markdown.",
     tools: [],
     capabilities: [],
     inference: { sources: [{ provider: source.provider, model: source.model }] },
@@ -48,8 +34,9 @@ export function definePostWorkflow(source: Source): WorkflowDefinition {
     trigger: { type: "manual" },
     steps: {
       draft: step({ agent: drafter, input: { from: "trigger.payload" } }),
-      policy: step({
-        agent: deterministicAgent("post-policy", VALIDATE_POST_CAPABILITY),
+      policy: deterministicToolStep({
+        id: "post-policy",
+        tool: VALIDATE_POST_TOOL,
         after: ["draft"],
         input: { from: "steps.draft.output" },
       }),
@@ -57,10 +44,11 @@ export function definePostWorkflow(source: Source): WorkflowDefinition {
         name: APPROVAL_SIGNAL,
         after: ["policy"],
       }),
-      publish: step({
-        agent: deterministicAgent("post-publisher", PUBLISH_POST_CAPABILITY),
+      publish: deterministicToolStep({
+        id: "post-publisher",
+        tool: PUBLISH_POST_TOOL,
         after: ["approval"],
-        input: { from: "steps.policy.output" },
+        input: { from: "steps.policy.output.content" },
       }),
     },
   });

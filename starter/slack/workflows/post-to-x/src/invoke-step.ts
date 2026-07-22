@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   createAgent,
   createDefaultDirectorRegistry,
+  type AgentToolRunner,
   type AgentDefinition,
   type BaseEnv,
 } from "@intx/agent";
@@ -17,17 +18,17 @@ import {
 
 import type { Source } from "@corbits/example-slack-agent";
 
-import { requireApprovedPost, validateXPost } from "./post";
 import {
-  PUBLISH_POST_CAPABILITY,
-  VALIDATE_POST_CAPABILITY,
-} from "./workflow";
-import type { Publisher } from "./x-client";
+  DETERMINISTIC_TOOL_KIND,
+  runDeterministicToolStep,
+  STEP_KIND_TAG,
+  STEP_TOOL_TAG,
+} from "./deterministic-tool-step";
 
 export function createPostStepInvoker(opts: {
   source: Source;
   contextRoot: string;
-  publisher: Publisher;
+  toolRunner: AgentToolRunner;
   authorize: WorkflowAuthorizeFn;
   log?: (line: string) => void;
   onStepDone?: (stepID: string, output: unknown) => void;
@@ -35,13 +36,11 @@ export function createPostStepInvoker(opts: {
   const {
     source,
     contextRoot,
-    publisher,
+    toolRunner,
     authorize,
     log,
     onStepDone,
   } = opts;
-  let publishAttempted = false;
-
   return async ({ agent, input, authzContext, signal }) => {
     const stepID = authzContext.stepId ?? agent.id;
     try {
@@ -51,7 +50,25 @@ export function createPostStepInvoker(opts: {
       log?.(`step ${stepID}: ${agent.id} running`);
 
       let output: unknown;
-      if (agent.capabilities.length === 0) {
+      const toolName = agent.tags?.[STEP_TOOL_TAG];
+      if (
+        agent.tags?.[STEP_KIND_TAG] === DETERMINISTIC_TOOL_KIND &&
+        toolName !== undefined
+      ) {
+        if (
+          agent.capabilities.length !== 1 ||
+          agent.capabilities[0] !== toolName
+        ) {
+          throw new Error(`deterministic step ${stepID} has invalid capabilities`);
+        }
+        output = await runDeterministicToolStep({
+          runner: toolRunner,
+          stepId: stepID,
+          toolName,
+          input,
+          signal,
+        });
+      } else if (agent.capabilities.length === 0) {
         output = await runDraftAgent({
           agent,
           input,
@@ -60,24 +77,8 @@ export function createPostStepInvoker(opts: {
           authorize,
           authzContext,
         });
-      } else if (
-        agent.capabilities.length === 1 &&
-        agent.capabilities[0] === VALIDATE_POST_CAPABILITY
-      ) {
-        output = validateXPost(input);
-      } else if (
-        agent.capabilities.length === 1 &&
-        agent.capabilities[0] === PUBLISH_POST_CAPABILITY
-      ) {
-        if (signal.aborted) throw new Error(`step ${stepID} was cancelled`);
-        const approvedPost = requireApprovedPost(input);
-        if (publishAttempted) {
-          throw new Error(`step ${stepID} already attempted to publish`);
-        }
-        publishAttempted = true;
-        output = await publisher.publish(approvedPost.text);
       } else {
-        throw new Error(`unsupported step capability for ${stepID}`);
+        throw new Error(`unsupported step configuration for ${stepID}`);
       }
 
       log?.(`step ${stepID}: done`);
